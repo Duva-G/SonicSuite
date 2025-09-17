@@ -6,20 +6,17 @@ type Props = {
 };
 
 export default function ModeBar({ mode, onChangeMode }: Props) {
+  const originalClass = `segmented-control__segment${mode === "original" ? " is-active" : ""}`;
+  const convolvedClass = `segmented-control__segment${mode === "convolved" ? " is-active" : ""}`;
+
   return (
-    <section style={{ marginBottom: 12 }}>
-      <button
-        onClick={() => onChangeMode("original")}
-        style={{ marginRight: 4, fontWeight: mode === "original" ? 700 : 400 }}
-      >
+    <div className="segmented-control" role="group" aria-label="Playback mode selector">
+      <button type="button" className={originalClass} onClick={() => onChangeMode("original")}>
         Original
       </button>
-      <button
-        onClick={() => onChangeMode("convolved")}
-        style={{ fontWeight: mode === "convolved" ? 700 : 400 }}
-      >
+      <button type="button" className={convolvedClass} onClick={() => onChangeMode("convolved")}>
         Convolved
       </button>
-    </section>
+    </div>
   );
 }

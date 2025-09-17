@@ -4,6 +4,7 @@ import Transport from "./ui/Transport";
 import ModeBar from "./ui/ModeBar";
 import type { Mode } from "./ui/ModeBar";
 import ExportBar from "./ui/ExportBar";
+import "./App.css";
 
 export default function App() {
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -52,8 +53,8 @@ export default function App() {
     try {
       const buf = await decodeFile(f);
       irBufRef.current = buf;
-      setStatus(
-        (s) => s + `\nIR loaded: ${f.name} • ${buf.sampleRate} Hz • ${buf.duration.toFixed(3)} s`
+      setStatus((s) =>
+        s + `\nIR loaded: ${f.name} • ${buf.sampleRate} Hz • ${buf.duration.toFixed(3)} s`
       );
     } catch (err) {
       setStatus(`IR load failed: ${(err as Error).message}`);
@@ -63,7 +64,9 @@ export default function App() {
   function teardownGraph() {
     try {
       srcRef.current?.stop();
-    } catch {}
+  } catch (err: unknown) {
+    console.warn("Audio source stop failed", err);
+  }
     srcRef.current?.disconnect();
     convRef.current?.disconnect();
     gainRef.current?.disconnect();
@@ -273,27 +276,52 @@ export default function App() {
   }
 
   return (
-    <div style={{ fontFamily: "system-ui", margin: 16, maxWidth: 900 }}>
-      <h1>Harbeth SonicSuite — Web Convolver MVP</h1>
+    <div className="app">
+      <div className="app-shell">
+        <header className="app-header">
+          <span className="app-badge">Harbeth Audio</span>
+          <h1 className="app-title">SonicSuite Convolver</h1>
+          <p className="app-subtitle">
+            Harbeth SonicSuite: a powerful tool to convolve, compare, and analyse audio with precision.
+          </p>
+        </header>
 
-      <FileInputs onPickMusic={onPickMusic} onPickIR={onPickIR} />
-      <ModeBar mode={mode} onChangeMode={onChangeMode} />
-      <Transport
-        isPlaying={isPlaying}
-        playPause={playPause}
-        stopAll={stopAll}
-        vol={vol}
-        onChangeVol={onChangeVol}
-      />
-      <ExportBar renderAndExport={renderAndExport} downloadUrl={downloadUrl} />
+        <FileInputs onPickMusic={onPickMusic} onPickIR={onPickIR} />
 
-      <pre style={{ background: "#f5f5f5", padding: 12, borderRadius: 6, whiteSpace: "pre-wrap" }}>
-        {status}
-      </pre>
+        <section className="panel mode-panel">
+          <div className="panel-header">
+            <div>
+              <h2 className="panel-title">Playback mode</h2>
+              <p className="panel-desc">Switch between the dry signal and the convolved render.</p>
+            </div>
+          </div>
+          <ModeBar mode={mode} onChangeMode={onChangeMode} />
+        </section>
 
-      <p style={{ color: "#666" }}>
-        Notes: Playback uses Web Audio. Rendering uses OfflineAudioContext. RMS matched before export.
-      </p>
+        <Transport
+          isPlaying={isPlaying}
+          playPause={playPause}
+          stopAll={stopAll}
+          vol={vol}
+          onChangeVol={onChangeVol}
+        />
+
+        <ExportBar renderAndExport={renderAndExport} downloadUrl={downloadUrl} />
+
+        <section className="panel status-panel">
+          <div className="panel-header">
+            <div>
+              <h2 className="panel-title">Session status</h2>
+              <p className="panel-desc">Track file loading, rendering progress, and export readiness.</p>
+            </div>
+          </div>
+          <pre>{status}</pre>
+        </section>
+
+        <p className="footnote">
+          Notes: Playback uses Web Audio. Rendering uses OfflineAudioContext. RMS matched before export.
+        </p>
+      </div>
     </div>
   );
 }

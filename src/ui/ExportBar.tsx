@@ -5,13 +5,25 @@ type Props = {
 
 export default function ExportBar({ renderAndExport, downloadUrl }: Props) {
   return (
-    <section style={{ marginBottom: 12 }}>
-      <button onClick={renderAndExport}>Render & Export WAV</button>
-      {downloadUrl && (
-        <a href={downloadUrl} download="convolved_A.wav" style={{ marginLeft: 12 }}>
-          Download
-        </a>
-      )}
+    <section className="panel export-panel">
+      <div className="panel-header">
+        <div>
+          <h2 className="panel-title">Render & export</h2>
+          <p className="panel-desc">Bounce an RMS-matched WAV ready for delivery or archiving.</p>
+        </div>
+        {downloadUrl && (
+          <a className="button-link" href={downloadUrl} download="convolved_A.wav">
+            Download mix
+          </a>
+        )}
+      </div>
+      <button
+        type="button"
+        className="control-button button-primary export-button"
+        onClick={renderAndExport}
+      >
+        Render mix
+      </button>
     </section>
   );
 }
