@@ -1,281 +1,383 @@
-1  import React, { useRef, useState } from "react";
-2  import FileInputs from "./ui/FileInputs";
-3  import Transport from "./ui/Transport";
-4  import ModeBar, { Mode } from "./ui/ModeBar";
-5  import ExportBar from "./ui/ExportBar";
-6  
-7  export default function App() {
-8    const audioCtxRef = useRef<AudioContext | null>(null);
-9    const srcRef = useRef<AudioBufferSourceNode | null>(null);
-10   const convRef = useRef<ConvolverNode | null>(null);
-11   const gainRef = useRef<GainNode | null>(null);
-12 
-13   const musicBufRef = useRef<AudioBuffer | null>(null);
-14   const irBufRef = useRef<AudioBuffer | null>(null);
-15 
-16   const startTimeRef = useRef(0);
-17   const startOffsetRef = useRef(0);
-18 
-19   const [isPlaying, setPlaying] = useState(false);
-20   const [mode, setMode] = useState<Mode>("original");
-21   const [vol, setVol] = useState<number>(1.0);
-22   const [status, setStatus] = useState<string>("Load a music WAV and an IR WAV.");
-23   const [downloadUrl, setDownloadUrl] = useState<string>("");
-24 
-25   function ensureCtx(): AudioContext {
-26     if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
-27     return audioCtxRef.current;
-28   }
-29 
-30   async function decodeFile(file: File): Promise<AudioBuffer> {
-31     const ctx = ensureCtx();
-32     const arr = await file.arrayBuffer();
-33     return await ctx.decodeAudioData(arr.slice(0));
-34   }
-35 
-36   async function onPickMusic(e: React.ChangeEvent<HTMLInputElement>) {
-37     const f = e.target.files?.[0];
-38     if (!f) return;
-39     try {
-40       const buf = await decodeFile(f);
-41       musicBufRef.current = buf;
-42       setStatus(`Music loaded: ${f.name} • ${buf.sampleRate} Hz • ${buf.duration.toFixed(2)} s`);
-43     } catch (err) {
-44       setStatus(`Music load failed: ${(err as Error).message}`);
-45     }
-46   }
-47 
-48   async function onPickIR(e: React.ChangeEvent<HTMLInputElement>) {
-49     const f = e.target.files?.[0];
-50     if (!f) return;
-51     try {
-52       const buf = await decodeFile(f);
-53       irBufRef.current = buf;
-54       setStatus((s) => s + `\nIR loaded: ${f.name} • ${buf.sampleRate} Hz • ${buf.duration.toFixed(3)} s`);
-55     } catch (err) {
-56       setStatus(`IR load failed: ${(err as Error).message}`);
-57     }
-58   }
-59 
-60   function teardownGraph() {
-61     try { srcRef.current?.stop(); } catch {}
-62     srcRef.current?.disconnect();
-63     convRef.current?.disconnect();
-64     gainRef.current?.disconnect();
-65     srcRef.current = null;
-66     convRef.current = null;
-67     gainRef.current = null;
-68   }
-69 
-70   function makeGraph(at: number) {
-71     const ctx = ensureCtx();
-72     const music = musicBufRef.current;
-73     if (!music) { setStatus("No music loaded."); return; }
-74 
-75     const src = new AudioBufferSourceNode(ctx, { buffer: music });
-76     const gain = new GainNode(ctx, { gain: vol });
-77     srcRef.current = src;
-78     gainRef.current = gain;
-79 
-80     if (mode === "convolved") {
-81       const ir = irBufRef.current;
-82       if (!ir) { setStatus("No IR loaded."); return; }
-83       const conv = new ConvolverNode(ctx, { buffer: ir, disableNormalization: false });
-84       convRef.current = conv;
-85       src.connect(conv).connect(gain).connect(ctx.destination);
-86     } else {
-87       src.connect(gain).connect(ctx.destination);
-88     }
-89 
-90     src.start(0, at);
-91     startTimeRef.current = ctx.currentTime;
-92     setPlaying(true);
-93   }
-94 
-95   function currentOffset(): number {
-96     const ctx = audioCtxRef.current;
-97     if (!ctx) return 0;
-98     return startOffsetRef.current + (ctx.currentTime - startTimeRef.current);
-99   }
-100 
-101  function playPause() {
-102    if (!isPlaying) {
-103      makeGraph(startOffsetRef.current);
-104    } else {
-105      const off = currentOffset();
-106      teardownGraph();
-107      startOffsetRef.current = off;
-108      setPlaying(false);
-109    }
-110  }
-111 
-112  function stopAll() {
-113    teardownGraph();
-114    startOffsetRef.current = 0;
-115    setPlaying(false);
-116  }
-117 
-118  function onChangeMode(next: Mode) {
-119    if (next === mode) return;
-120    const off = isPlaying ? currentOffset() : startOffsetRef.current;
-121    teardownGraph();
-122    setMode(next);
-123    startOffsetRef.current = off;
-124    if (isPlaying) makeGraph(off);
-125  }
-126 
-127  function onChangeVol(v: number) {
-128    setVol(v);
-129    if (gainRef.current) gainRef.current.gain.value = v;
-130  }
-131 
-132  async function renderAndExport() {
-133    const music = musicBufRef.current;
-134    const ir = irBufRef.current;
-135    if (!music || !ir) { setStatus("Load music and IR first."); return; }
-136 
-137    const outLen = Math.max(1, music.length + ir.length - 1);
-138    const ch = music.numberOfChannels;
-139    const sr = music.sampleRate;
-140 
-141    const off = new OfflineAudioContext(ch, outLen, sr);
-142    const src = new AudioBufferSourceNode(off, { buffer: music });
-143    const conv = new ConvolverNode(off, { buffer: ir, disableNormalization: false });
-144    const gain = new GainNode(off, { gain: 1.0 });
-145    src.connect(conv).connect(gain).connect(off.destination);
-146    src.start();
-147 
-148    setStatus("Rendering…");
-149    const rendered = await off.startRendering();
-150 
-151    const rOrig = rmsBuffer(music);
-152    const rConv = rmsBuffer(rendered);
-153    const ratio = rConv > 0 ? rOrig / rConv : 1.0;
-154    if (ratio !== 1) scaleInPlace(rendered, Math.min(4, Math.max(0.1, ratio)));
-155 
-156    const wav = audioBufferToWav(rendered, 16);
-157    const blob = new Blob([wav], { type: "audio/wav" });
-158    const url = URL.createObjectURL(blob);
-159    setDownloadUrl(url);
-160    setStatus("Rendered. Click Download.");
-161  }
-162 
-163  function rmsBuffer(buf: AudioBuffer): number {
-164    let acc = 0, n = 0;
-165    for (let ch = 0; ch < buf.numberOfChannels; ch++) {
-166      const d = buf.getChannelData(ch);
-167      for (let i = 0; i < d.length; i++) { const x = d[i]; acc += x * x; }
-168      n += d.length;
-169    }
-170    return n ? Math.sqrt(acc / n) : 0;
-171  }
-172 
-173  function scaleInPlace(buf: AudioBuffer, g: number) {
-174    for (let ch = 0; ch < buf.numberOfChannels; ch++) {
-175      const d = buf.getChannelData(ch);
-176      for (let i = 0; i < d.length; i++) {
-177        let v = d[i] * g;
-178        if (v > 1) v = 1;
-179        if (v < -1) v = -1;
-180        d[i] = v;
-181      }
-182    }
-183  }
-184 
-185  function audioBufferToWav(buf: AudioBuffer, bitDepth: 16 | 24 | 32 = 16): ArrayBuffer {
-186    const numCh = buf.numberOfChannels;
-187    const len = buf.length;
-188    const sr = buf.sampleRate;
-189 
-190    const interleaved = new Float32Array(len * numCh);
-191    for (let i = 0; i < len; i++) {
-192      for (let ch = 0; ch < numCh; ch++) {
-193        interleaved[i * numCh + ch] = buf.getChannelData(ch)[i];
-194      }
-195    }
-196 
-197    let bytesPerSample: number;
-198    let pcm: DataView;
-199    if (bitDepth === 16) {
-200      bytesPerSample = 2;
-201      const out = new ArrayBuffer(interleaved.length * 2);
-202      pcm = new DataView(out);
-203      for (let i = 0; i < interleaved.length; i++) {
-204        const s = Math.max(-1, Math.min(1, interleaved[i]));
-205        pcm.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-206      }
-207    } else if (bitDepth === 24) {
-208      bytesPerSample = 3;
-209      const out = new ArrayBuffer(interleaved.length * 3);
-210      pcm = new DataView(out);
-211      for (let i = 0; i < interleaved.length; i++) {
-212        const s = Math.max(-1, Math.min(1, interleaved[i]));
-213        const v = Math.floor(s < 0 ? s * 0x800000 : s * 0x7fffff);
-214        pcm.setUint8(i * 3 + 0, v & 0xff);
-215        pcm.setUint8(i * 3 + 1, (v >> 8) & 0xff);
-216        pcm.setUint8(i * 3 + 2, (v >> 16) & 0xff);
-217      }
-218    } else {
-219      bytesPerSample = 4;
-220      const out = new ArrayBuffer(interleaved.length * 4);
-221      pcm = new DataView(out);
-222      for (let i = 0; i < interleaved.length; i++) {
-223        pcm.setFloat32(i * 4, interleaved[i], true);
-224      }
-225    }
-226 
-227    const blockAlign = numCh * bytesPerSample;
-228    const byteRate = sr * blockAlign;
-229    const dataSize = pcm.buffer.byteLength;
-230    const wav = new ArrayBuffer(44 + dataSize);
-231    const view = new DataView(wav);
-232 
-233    writeStr(view, 0, "RIFF");
-234    view.setUint32(4, 36 + dataSize, true);
-235    writeStr(view, 8, "WAVE");
-236 
-237    writeStr(view, 12, "fmt ");
-238    view.setUint32(16, 16, true);
-239    const format = bitDepth === 32 ? 3 : 1;
-240    view.setUint16(20, format, true);
-241    view.setUint16(22, numCh, true);
-242    view.setUint32(24, sr, true);
-243    view.setUint32(28, byteRate, true);
-244    view.setUint16(32, blockAlign, true);
-245    view.setUint16(34, bitDepth, true);
-246 
-247    writeStr(view, 36, "data");
-248    view.setUint32(40, dataSize, true);
-249    new Uint8Array(wav, 44).set(new Uint8Array(pcm.buffer));
-250    return wav;
-251  }
-252 
-253  function writeStr(view: DataView, offset: number, s: string) {
-254    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
-255  }
-256 
-257  return (
-258    <div style={{ fontFamily: "system-ui", margin: 16, maxWidth: 900 }}>
-259      <h1>Harbeth SonicSuite — Web Convolver MVP</h1>
-260 
-261      <FileInputs onPickMusic={onPickMusic} onPickIR={onPickIR} />
-262      <ModeBar mode={mode} onChangeMode={onChangeMode} />
-263      <Transport
-264        isPlaying={isPlaying}
-265        playPause={playPause}
-266        stopAll={stopAll}
-267        vol={vol}
-268        onChangeVol={onChangeVol}
-269      />
-270      <ExportBar renderAndExport={renderAndExport} downloadUrl={downloadUrl} />
-271 
-272      <pre style={{ background: "#f5f5f5", padding: 12, borderRadius: 6, whiteSpace: "pre-wrap" }}>
-273        {status}
-274      </pre>
-275 
-276      <p style={{ color: "#666" }}>
-277        Notes: Playback uses Web Audio. Rendering uses OfflineAudioContext. RMS is matched before export.
-278      </p>
-279    </div>
-280  );
-281 }
+.app {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  padding: clamp(32px, 6vw, 72px) 16px 96px;
+}
+
+.app-shell {
+  width: min(960px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: clamp(32px, 5vw, 56px);
+  border-radius: 32px;
+  background: rgba(255, 255, 255, 0.74);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: 0 42px 88px rgba(15, 23, 42, 0.14);
+  backdrop-filter: blur(42px) saturate(1.6);
+}
+
+.app-header {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.app-badge {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0.35rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(10, 132, 255, 0.12);
+  color: #0a84ff;
+  border: 1px solid rgba(10, 132, 255, 0.25);
+}
+
+.app-title {
+  font-size: clamp(2.4rem, 5vw, 3.4rem);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: #050505;
+}
+
+.app-subtitle {
+  font-size: 1.05rem;
+  color: #3a3a3c;
+  max-width: 560px;
+}
+
+.panel {
+  background: rgba(255, 255, 255, 0.68);
+  border-radius: 26px;
+  padding: 24px clamp(20px, 4vw, 32px);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(30px);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.panel-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.panel-desc {
+  font-size: 0.95rem;
+  color: #636366;
+  max-width: 36rem;
+}
+
+.file-card-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.file-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+  border-radius: 22px;
+  border: 1px solid rgba(120, 120, 128, 0.16);
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.95), rgba(246, 246, 248, 0.65));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 12px 30px rgba(15, 23, 42, 0.06);
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.file-card:hover {
+  transform: translateY(-3px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 20px 40px rgba(15, 23, 42, 0.12);
+  border-color: rgba(10, 132, 255, 0.3);
+}
+
+.file-card__icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 16px;
+  background: linear-gradient(160deg, #0a84ff 0%, #3a7bf5 50%, #6ec6ff 100%);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
+  font-weight: 600;
+  box-shadow: 0 8px 18px rgba(10, 132, 255, 0.35);
+}
+
+.file-card:nth-child(2) .file-card__icon {
+  background: linear-gradient(160deg, #30d158 0%, #34c759 50%, #5ef07a 100%);
+  box-shadow: 0 8px 18px rgba(52, 199, 89, 0.35);
+}
+
+.file-card__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.file-card__title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #1c1c1e;
+}
+
+.file-card__subtitle {
+  font-size: 0.9rem;
+  color: #636366;
+}
+
+.file-card__action {
+  padding: 0.45rem 1.2rem;
+  border-radius: 999px;
+  background: rgba(10, 132, 255, 0.12);
+  color: #0a84ff;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+.file-card__input {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .file-card {
+    grid-template-columns: 1fr;
+    text-align: left;
+  }
+
+  .file-card__action {
+    justify-self: flex-start;
+  }
+}
+
+.segmented-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: rgba(118, 118, 128, 0.12);
+  border-radius: 18px;
+  border: 1px solid rgba(118, 118, 128, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+
+.segmented-control__segment {
+  padding: 0.45rem 1.5rem;
+  border-radius: 14px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border: none;
+  background: transparent;
+  color: #3a3a3c;
+  transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: none;
+}
+
+.segmented-control__segment:hover {
+  background: rgba(255, 255, 255, 0.4);
+  color: #1c1c1e;
+}
+
+.segmented-control__segment.is-active {
+  background: linear-gradient(180deg, #ffffff 0%, #f1f1f3 100%);
+  color: #111;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
+}
+
+.transport-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.control-button {
+  padding: 0.65rem 1.6rem;
+  border-radius: 16px;
+  font-size: 1rem;
+  font-weight: 600;
+  background: linear-gradient(180deg, #ffffff 0%, #f2f2f7 100%);
+  border: 1px solid rgba(60, 60, 67, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 12px 24px rgba(15, 23, 42, 0.08);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.control-button:hover {
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 18px 36px rgba(15, 23, 42, 0.14);
+}
+
+.button-primary {
+  background: linear-gradient(180deg, #0a84ff 0%, #0060df 100%);
+  color: #fff;
+  border: 1px solid rgba(10, 132, 255, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 20px 40px rgba(10, 132, 255, 0.35);
+}
+
+.button-primary:hover {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 24px 46px rgba(10, 132, 255, 0.45);
+}
+
+.button-ghost {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0%, rgba(244, 244, 246, 0.9) 100%);
+  color: #1c1c1e;
+}
+
+.volume-control {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 0.95rem;
+  color: #3a3a3c;
+}
+
+.volume-slider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.volume-slider__input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: min(360px, 100%);
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(120, 120, 128, 0.2);
+  outline: none;
+  transition: background 0.2s ease;
+}
+
+.volume-slider__input:hover {
+  background: rgba(10, 132, 255, 0.35);
+}
+
+.volume-slider__input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #0a84ff;
+  border: 2px solid #fff;
+  box-shadow: 0 6px 12px rgba(10, 132, 255, 0.35);
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.volume-slider__input::-webkit-slider-thumb:hover {
+  transform: scale(1.05);
+}
+
+.volume-slider__input::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #0a84ff;
+  border: 2px solid #fff;
+  box-shadow: 0 6px 12px rgba(10, 132, 255, 0.35);
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.volume-slider__input::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(120, 120, 128, 0.2);
+}
+
+.volume-value {
+  font-weight: 600;
+  color: #1c1c1e;
+  min-width: 64px;
+}
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.55rem 1.4rem;
+  border-radius: 999px;
+  font-weight: 600;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(240, 240, 244, 0.96) 100%);
+  border: 1px solid rgba(60, 60, 67, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 12px 24px rgba(15, 23, 42, 0.08);
+  text-decoration: none;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.button-link:hover {
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 18px 36px rgba(15, 23, 42, 0.14);
+}
+
+.export-button {
+  align-self: flex-start;
+  margin-top: -8px;
+}
+
+.status-panel pre {
+  margin: 0;
+  font-family: "SFMono-Regular", "SF Mono", "Menlo", "Monaco", "Consolas", "Liberation Mono", "Courier New", monospace;
+  font-size: 0.9rem;
+  color: #1c1c1e;
+  background: rgba(255, 255, 255, 0.7);
+  padding: 16px 20px;
+  border-radius: 18px;
+  border: 1px solid rgba(120, 120, 128, 0.12);
+  white-space: pre-wrap;
+  word-break: break-word;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.footnote {
+  font-size: 0.85rem;
+  color: #7c7c80;
+  text-align: center;
+  margin-top: 8px;
+}
+
+@media (max-width: 768px) {
+  .app-shell {
+    padding: 28px 20px;
+    border-radius: 24px;
+  }
+
+  .panel {
+    padding: 20px;
+    border-radius: 22px;
+  }
+}
+
+@media (max-width: 540px) {
+  .app {
+    padding: 24px 12px 72px;
+  }
+
+  .app-title {
+    font-size: clamp(2rem, 8vw, 2.8rem);
+  }
+}
