@@ -64,7 +64,7 @@ export default function App() {
   function teardownGraph() {
     try {
       srcRef.current?.stop();
-  } catch (err) {
+  } catch (err: unknown) {
     console.warn("Audio source stop failed", err);
   }
     srcRef.current?.disconnect();
@@ -279,10 +279,10 @@ export default function App() {
     <div className="app">
       <div className="app-shell">
         <header className="app-header">
-          <span className="app-badge">Harbeth Labs</span>
-          <h1 className="app-title">SonicSuite Spatial Convolver</h1>
+          <span className="app-badge">Harbeth Audio</span>
+          <h1 className="app-title">SonicSuite Convolver</h1>
           <p className="app-subtitle">
-            Bring studio-grade impulse responses to your mixes directly in the browser.
+            Harbeth SonicSuite: a powerful tool to convolve, compare, and analyse audio with precision.
           </p>
         </header>
 

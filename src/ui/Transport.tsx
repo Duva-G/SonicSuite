@@ -30,7 +30,7 @@ export default function Transport({
         </button>
       </div>
       <label className="volume-control">
-        <span className="volume-label">Output level</span>
+        <span className="volume-label">Volume</span>
         <div className="volume-slider">
           <input
             className="volume-slider__input"
