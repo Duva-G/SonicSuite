@@ -1,17 +1,21 @@
-type Props = {
+﻿type Props = {
   isPlaying: boolean;
   playPause: () => void;
   stopAll: () => void;
-  vol: number;
-  onChangeVol: (v: number) => void;
+  originalVol: number;
+  onChangeOriginalVol: (v: number) => void;
+  convolvedVol: number;
+  onChangeConvolvedVol: (v: number) => void;
 };
 
 export default function Transport({
   isPlaying,
   playPause,
   stopAll,
-  vol,
-  onChangeVol,
+  originalVol,
+  onChangeOriginalVol,
+  convolvedVol,
+  onChangeConvolvedVol,
 }: Props) {
   return (
     <section className="panel transport-panel">
@@ -29,21 +33,38 @@ export default function Transport({
           Stop
         </button>
       </div>
-      <label className="volume-control">
-        <span className="volume-label">Volume</span>
-        <div className="volume-slider">
-          <input
-            className="volume-slider__input"
-            type="range"
-            min={0}
-            max={2}
-            step={0.01}
-            value={vol}
-            onChange={(e) => onChangeVol(parseFloat(e.target.value))}
-          />
-          <span className="volume-value">{vol.toFixed(2)}×</span>
-        </div>
-      </label>
+      <div className="volume-group">
+        <label className="volume-control">
+          <span className="volume-label">Original Volume</span>
+          <div className="volume-slider">
+            <input
+              className="volume-slider__input"
+              type="range"
+              min={0}
+              max={2}
+              step={0.01}
+              value={originalVol}
+              onChange={(e) => onChangeOriginalVol(parseFloat(e.target.value))}
+            />
+            <span className="volume-value">{originalVol.toFixed(2)}×</span>
+          </div>
+        </label>
+        <label className="volume-control">
+          <span className="volume-label">Convolved Volume</span>
+          <div className="volume-slider">
+            <input
+              className="volume-slider__input"
+              type="range"
+              min={0}
+              max={2}
+              step={0.01}
+              value={convolvedVol}
+              onChange={(e) => onChangeConvolvedVol(parseFloat(e.target.value))}
+            />
+            <span className="volume-value">{convolvedVol.toFixed(2)}×</span>
+          </div>
+        </label>
+      </div>
     </section>
   );
 }

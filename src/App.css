@@ -18,7 +18,15 @@
   backdrop-filter: blur(42px) saturate(1.35);
 }
 
-.app-logo {\n  height: 52px;\n  width: auto;\n  display: block;\n  filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.35));\n}\n\n
+
+
+.app-logo {
+  height: 40px;
+  width: auto;
+  display: block;
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.32));
+}
+
 
 .app-header {
   display: flex;
@@ -496,5 +504,7 @@
   outline: 2px solid rgba(255, 255, 255, 0.9);
   outline-offset: 2px;
 }
+
+
 
 
