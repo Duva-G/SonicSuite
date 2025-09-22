@@ -19,7 +19,27 @@ type ComputeMessage = {
   };
 };
 
-type WorkerRequest = ComputeMessage;
+type ComputePlaybackMessage = {
+  type: "compute-playback-fr";
+  requestId: number;
+  payload: {
+    sampleRate: number;
+    smoothing: SmoothingMode;
+    music: {
+      data: Float32Array;
+      sampleRate: number;
+      label: string;
+    };
+    ir: {
+      data: Float32Array;
+      sampleRate: number;
+      label: string;
+    } | null;
+  };
+};
+
+type WorkerRequest = ComputeMessage | ComputePlaybackMessage;
+
 
 type BaseSpectra = {
   freqs: Float32Array;
@@ -32,8 +52,19 @@ type BaseSpectra = {
 
 type SmoothedSpectra = BaseSpectra & { smoothing: SmoothingMode };
 
+type PlaybackSpectra = {
+  freqs: Float32Array;
+  dryDb: Float32Array;
+  wetDb: Float32Array | null;
+  hasIR: boolean;
+};
+
+type SmoothedPlaybackSpectra = PlaybackSpectra & { smoothing: SmoothingMode };
+
 const baseCache = new Map<string, BaseSpectra>();
 const smoothingCache = new Map<string, SmoothedSpectra>();
+const playbackBaseCache = new Map<string, PlaybackSpectra>();
+const playbackSmoothingCache = new Map<string, SmoothedPlaybackSpectra>();
 
 const EPS = 1e-20;
 
@@ -46,6 +77,15 @@ ctx.onmessage = (event: MessageEvent<WorkerRequest>) => {
       const message = err instanceof Error ? err.message : "Unknown worker error";
       ctx.postMessage({
         type: "fr-error",
+        requestId: msg.requestId,
+        error: message,
+      });
+    });
+  } else if (msg.type === "compute-playback-fr") {
+    handlePlaybackCompute(msg).catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : "Unknown worker error";
+      ctx.postMessage({
+        type: "playback-fr-error",
         requestId: msg.requestId,
         error: message,
       });
@@ -97,6 +137,57 @@ async function handleCompute(msg: ComputeMessage): Promise<void> {
   );
 }
 
+async function handlePlaybackCompute(msg: ComputePlaybackMessage): Promise<void> {
+  const { sampleRate, smoothing, music, ir } = msg.payload;
+  if (!music || music.data.length === 0) {
+    ctx.postMessage({
+      type: "playback-fr-error",
+      requestId: msg.requestId,
+      error: "Music buffer is empty.",
+    });
+    return;
+  }
+
+  const musicHash = hashFloatArray(music.data, music.sampleRate);
+  const irHash = ir && ir.data.length > 0 ? hashFloatArray(ir.data, ir.sampleRate) : "none";
+  const baseKey = `playback|${sampleRate}|${musicHash}|${irHash}`;
+
+  let base = playbackBaseCache.get(baseKey);
+  if (!base) {
+    base = await computePlaybackSpectra(sampleRate, music, ir);
+    playbackBaseCache.set(baseKey, base);
+  }
+
+  const smoothKey = `${baseKey}|${smoothing}`;
+  let smoothed = playbackSmoothingCache.get(smoothKey);
+  if (!smoothed) {
+    smoothed = { ...applyPlaybackSmoothing(base, smoothing), smoothing };
+    playbackSmoothingCache.set(smoothKey, smoothed);
+  }
+
+  const freqsCopy = smoothed.freqs.slice();
+  const dryCopy = smoothed.dryDb.slice();
+  const wetCopy = smoothed.wetDb ? smoothed.wetDb.slice() : null;
+
+  const transferables: Transferable[] = [freqsCopy.buffer, dryCopy.buffer];
+  if (wetCopy) transferables.push(wetCopy.buffer);
+
+  ctx.postMessage(
+    {
+      type: "playback-fr-result",
+      requestId: msg.requestId,
+      payload: {
+        freqs: freqsCopy,
+        dryDb: dryCopy,
+        wetDb: wetCopy,
+        hasIR: smoothed.hasIR,
+      },
+    },
+    transferables
+  );
+}
+
+
 async function computeBaseSpectra(
   sampleRate: number,
   ir: { data: Float32Array; sampleRate: number; label: string } | null
@@ -145,6 +236,55 @@ async function computeBaseSpectra(
   };
 }
 
+async function computePlaybackSpectra(
+  sampleRate: number,
+  music: { data: Float32Array; sampleRate: number; label: string },
+  ir: { data: Float32Array; sampleRate: number; label: string } | null
+): Promise<PlaybackSpectra> {
+  let dry = music.data;
+  if (music.sampleRate !== sampleRate) {
+    dry = resampleLinear(dry, music.sampleRate, sampleRate);
+  } else {
+    dry = dry.slice();
+  }
+
+  if (!ir || ir.data.length === 0) {
+    const dryResult = welchSingle(dry, sampleRate);
+    const limited = limitFrequencyRange(dryResult.freqs, 20, 20000, [dryResult.psd]);
+    const dryDb = powerArrayToDb(limited.arrays[0]);
+    return {
+      freqs: limited.freqs,
+      dryDb,
+      wetDb: null,
+      hasIR: false,
+    };
+  }
+
+  let irData = ir.data;
+  if (ir.sampleRate !== sampleRate) {
+    irData = resampleLinear(irData, ir.sampleRate, sampleRate);
+  } else {
+    irData = irData.slice();
+  }
+
+  const wetFull = convolveFFT(dry, irData);
+  const dryLength = dry.length;
+  const wetTrimmed = new Float32Array(dryLength);
+  wetTrimmed.set(wetFull.subarray(0, dryLength));
+
+  const pair = welchPair(dry, wetTrimmed, sampleRate);
+  const limited = limitFrequencyRange(pair.freqs, 20, 20000, [pair.psdX, pair.psdY]);
+  const dryDb = powerArrayToDb(limited.arrays[0]);
+  const wetDb = powerArrayToDb(limited.arrays[1]);
+
+  return {
+    freqs: limited.freqs,
+    dryDb,
+    wetDb,
+    hasIR: true,
+  };
+}
+
 function applySmoothing(base: BaseSpectra, smoothing: SmoothingMode): BaseSpectra {
   const fraction = smoothing === "1/12" ? 12 : smoothing === "1/6" ? 6 : 3;
   return {
@@ -158,6 +298,16 @@ function applySmoothing(base: BaseSpectra, smoothing: SmoothingMode): BaseSpectr
       : null,
     hasIR: base.hasIR,
     irLabel: base.irLabel,
+  };
+}
+
+function applyPlaybackSmoothing(base: PlaybackSpectra, smoothing: SmoothingMode): PlaybackSpectra {
+  const fraction = smoothing === "1/12" ? 12 : smoothing === "1/6" ? 6 : 3;
+  return {
+    freqs: base.freqs,
+    dryDb: applyFractionalSmoothing(base.freqs, base.dryDb, fraction),
+    wetDb: base.wetDb ? applyFractionalSmoothing(base.freqs, base.wetDb, fraction) : null,
+    hasIR: base.hasIR,
   };
 }
 
@@ -221,6 +371,15 @@ function welchSingle(signal: Float32Array, sampleRate: number) {
   return { freqs: result.freqs, psd: result.psdX };
 }
 
+function pickWelchSegmentSize(length: number): number {
+  const MAX_SIZE = 65536;
+  if (length >= MAX_SIZE) return MAX_SIZE;
+  if (length <= 0) return 0;
+  const power = Math.floor(Math.log2(length));
+  if (power <= 0) return 0;
+  return 1 << power;
+}
+
 function welchPair(x: Float32Array, y: Float32Array, sampleRate: number) {
   const result = welchCore(x, y, sampleRate);
   if (!result.psdY || !result.transfer) {
@@ -230,11 +389,14 @@ function welchPair(x: Float32Array, y: Float32Array, sampleRate: number) {
 }
 
 function welchCore(x: Float32Array, y: Float32Array | null, sampleRate: number) {
-  const nperseg = 65536;
-  if (x.length < nperseg) {
-    throw new Error("Pink noise buffer too short for Welch analysis");
+  const nperseg = pickWelchSegmentSize(x.length);
+  if (nperseg < 32) {
+    throw new Error("Signal too short for Welch analysis");
   }
-  const step = nperseg >> 1;
+  const step = Math.max(1, nperseg >> 1);
+  if (y && y.length < nperseg) {
+    throw new Error("Signal too short for Welch analysis");
+  }
   const segments = Math.floor((x.length - nperseg) / step) + 1;
   const { window, power } = getHann(nperseg);
   const fft = new FFT(nperseg);

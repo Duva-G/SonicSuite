@@ -4,10 +4,6 @@ import type { ComponentProps } from "react";
 import Plotly from "plotly.js-dist-min";
 import createPlotlyComponent from "react-plotly.js/factory";
 
-declare module "plotly.js-dist-min" {
-  const Plotly: any;
-}
-
 type SmoothingMode = "1/12" | "1/6" | "1/3";
 
 type WorkerResultPayload = {
@@ -327,5 +323,6 @@ function serializeBuffer(buffer: AudioBuffer, label: string) {
   }
   return { data: mono, sampleRate: buffer.sampleRate, label };
 }
+
 
 

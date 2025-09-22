@@ -1,5 +1,5 @@
 // WHY: Provides manual and automatic trimming controls for the impulse response.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WaveformPlot from "./WaveformPlot";
 
 type Props = {
@@ -46,21 +46,21 @@ export default function IRProcessingPanel({ original, processed, irName, onManua
   const endPercent = durationMs > 0 ? (endMs / durationMs) * 100 : 100;
   const selectionWidth = Math.max(0, endPercent - startPercent);
 
-  function clampMs(ms: number): number {
+  const clampMs = useCallback((ms: number): number => {
     if (!Number.isFinite(ms) || durationMs <= 0) return 0;
     return Math.max(0, Math.min(durationMs, ms));
-  }
+  }, [durationMs]);
 
-  function clientXToMs(clientX: number): number {
+  const clientXToMs = useCallback((clientX: number): number => {
     const slider = sliderRef.current;
     if (!slider || durationMs <= 0) return 0;
     const rect = slider.getBoundingClientRect();
     if (rect.width <= 0) return 0;
     const ratio = (clientX - rect.left) / rect.width;
     return clampMs(ratio * durationMs);
-  }
+  }, [durationMs, clampMs]);
 
-  function updateFromPointer(target: "start" | "end", clientX: number) {
+  const updateFromPointer = useCallback((target: "start" | "end", clientX: number) => {
     if (durationMs <= 0) return;
     const ms = clientXToMs(clientX);
     if (target === "start") {
@@ -72,12 +72,12 @@ export default function IRProcessingPanel({ original, processed, irName, onManua
       const next = clampMs(Math.max(ms, minEnd));
       setEndMs(next);
     }
-  }
+  }, [clampMs, clientXToMs, durationMs, minGapMs]);
 
-  function beginDrag(target: "start" | "end", clientX: number) {
+  const beginDrag = useCallback((target: "start" | "end", clientX: number) => {
     updateFromPointer(target, clientX);
     setDragTarget(target);
-  }
+  }, [updateFromPointer]);
 
   useEffect(() => {
     if (!dragTarget) return;
@@ -99,7 +99,7 @@ export default function IRProcessingPanel({ original, processed, irName, onManua
       window.removeEventListener("pointermove", handleMove);
       window.removeEventListener("pointerup", handleUp);
     };
-  }, [dragTarget, minGapMs, durationMs]);
+  }, [dragTarget, updateFromPointer]);
 
   function applyManual() {
     const clampedStart = clampMs(startMs);
