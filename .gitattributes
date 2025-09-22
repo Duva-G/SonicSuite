@@ -1,2 +1,4 @@
-#.husky hooks need LF endings
+* text=auto
+
+# Husky hooks must be LF on Windows
 .husky/* text eol=lf
