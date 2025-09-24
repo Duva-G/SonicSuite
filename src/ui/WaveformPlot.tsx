@@ -18,10 +18,11 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
         type: "scatter",
         mode: "lines",
         name: title,
-        line: { 
-          color, 
-          width: 1.5,
-          shape: 'linear'
+        line: {
+          color,
+          width: 1.8,
+          shape: "spline",
+          smoothing: 0.6,
         },
         hovertemplate: "<b>%{x:.3f}s</b><br>%{y:.6f}<extra></extra>",
         x: times,
@@ -35,31 +36,41 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
     () =>
       ({
         autosize: true,
-        height: 200,
-        margin: { t: 30, r: 20, l: 50, b: 30 },
+        height: 220,
+        margin: { t: 36, r: 26, l: 56, b: 40 },
         paper_bgcolor: "transparent",
         plot_bgcolor: "transparent",
-        font: { 
-          color: "rgba(235, 235, 245, 0.7)", 
-          family: "Inter, system-ui, sans-serif", 
-          size: 11 
+        font: {
+          color: "rgba(235, 235, 245, 0.78)",
+          family: "Inter, system-ui, sans-serif",
+          size: 12,
         },
+        hoverlabel: {
+          bgcolor: "rgba(22, 22, 26, 0.92)",
+          bordercolor: "rgba(255, 255, 255, 0.12)",
+          font: { color: "#f9f9ff" },
+        },
+        hovermode: "x unified",
         showlegend: false,
         xaxis: {
-          title: "Time (s)",
+          title: { text: "Time (s)", standoff: 12, font: { color: "rgba(235, 235, 245, 0.7)", size: 12 } },
           zeroline: true,
           showgrid: true,
-          gridcolor: "rgba(255,255,255,0.1)",
-          zerolinecolor: "rgba(255,255,255,0.2)",
-          tickfont: { size: 11 },
+          gridcolor: "rgba(255, 255, 255, 0.08)",
+          zerolinecolor: "rgba(10, 132, 255, 0.4)",
+          tickfont: { size: 11, color: "rgba(235, 235, 245, 0.65)" },
+          linecolor: "rgba(255, 255, 255, 0.16)",
+          mirror: true,
         },
         yaxis: {
-          title: "Amplitude",
+          title: { text: "Amplitude", standoff: 12, font: { color: "rgba(235, 235, 245, 0.7)", size: 12 } },
           autorange: true,
           showgrid: true,
-          gridcolor: "rgba(255,255,255,0.1)",
-          zerolinecolor: "rgba(255,255,255,0.3)",
-          tickfont: { size: 11 },
+          gridcolor: "rgba(255, 255, 255, 0.08)",
+          zerolinecolor: "rgba(255, 255, 255, 0.2)",
+          tickfont: { size: 11, color: "rgba(235, 235, 245, 0.65)" },
+          linecolor: "rgba(255, 255, 255, 0.16)",
+          mirror: true,
         },
       }),
     []
@@ -71,6 +82,8 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
         responsive: true,
         displaylogo: false,
         scrollZoom: true,
+        displayModeBar: true,
+        modeBarButtonsToRemove: ["select2d", "lasso2d"],
         toImageButtonOptions: {
           format: "png" as const,
           filename: "waveform",
@@ -87,7 +100,7 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
       type: string;
       mode: string;
       name: string;
-      line: { color: string; width: number; shape: string };
+      line: { color: string; width: number; shape: string; smoothing: number };
       hovertemplate: string;
       x: Float32Array;
       y: Float32Array;
@@ -107,6 +120,8 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
       responsive: boolean;
       displaylogo: boolean;
       scrollZoom: boolean;
+      displayModeBar: boolean;
+      modeBarButtonsToRemove: string[];
       toImageButtonOptions: Record<string, unknown>;
     };
     useResizeHandler?: boolean;
@@ -135,7 +150,7 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
       layout={layout}
       config={config}
       useResizeHandler
-      style={{ width: "100%", height: "100%" }}
+      style={{ width: "100%", height: "100%", minHeight: 220 }}
     />
   );
 }

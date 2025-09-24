@@ -41,15 +41,17 @@ export default function IRProcessingPanel({ original, processed, irName, onManua
       </div>
 
       <div className="ir-meta">
-        <div>
+        <div className="ir-meta__item">
           <span className="ir-meta__label">Source</span>
-          <span className="ir-meta__value">{irName || "Impulse response"}</span>
+          <span className="ir-meta__value" title={irName || "Impulse response"}>
+            {irName || "Impulse response"}
+          </span>
         </div>
-        <div>
+        <div className="ir-meta__item">
           <span className="ir-meta__label">Original length</span>
           <span className="ir-meta__value">{formattedDuration}</span>
         </div>
-        <div>
+        <div className="ir-meta__item" aria-live="polite">
           <span className="ir-meta__label">Processed length</span>
           <span className="ir-meta__value">{processedDuration}</span>
         </div>

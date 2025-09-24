@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import WaveformPlot from "./WaveformPlot";
 
 type Props = {
@@ -15,6 +15,8 @@ export default function FileInputs({ onPickMusic, onPickIR, musicBuffer, musicNa
   const [showIrWave, setShowIrWave] = useState(false);
   const tipsRef = useRef<HTMLDivElement | null>(null);
   const [showTips, setShowTips] = useState(false);
+  const musicMeta = useMemo(() => formatBufferMeta(musicBuffer), [musicBuffer]);
+  const irMeta = useMemo(() => formatBufferMeta(irBuffer), [irBuffer]);
 
   useEffect(() => {
     if (musicBuffer) {
@@ -98,23 +100,37 @@ export default function FileInputs({ onPickMusic, onPickIR, musicBuffer, musicNa
             />
           </label>
           {musicBuffer && (
-            <div className="waveform-section">
-              <div className="waveform-header">
-                <span className="waveform-title">{musicName || "Music waveform"}</span>
-                <button
-                  type="button"
-                  className="control-button button-ghost waveform-toggle"
-                  onClick={() => setShowMusicWave((v) => !v)}
-                >
-                  {showMusicWave ? "Hide waveform" : "Show waveform"}
-                </button>
+            <>
+              <div className="file-status" aria-live="polite">
+                <span className="file-status__label">Selected file</span>
+                <span className="file-status__value" title={musicName || "Music waveform"}>
+                  {musicName || "Music waveform"}
+                </span>
+                {musicMeta && <span className="file-status__meta">{musicMeta}</span>}
               </div>
-              {showMusicWave && (
-                <div className="waveform-plot">
-                  <WaveformPlot buffer={musicBuffer} color="#5ac8fa" title={musicName || "Music"} />
+              <div className="waveform-section">
+                <div className="waveform-header">
+                  <div className="waveform-title">
+                    <span className="waveform-title__name" title={musicName || "Music waveform"}>
+                      {musicName || "Music waveform"}
+                    </span>
+                    {musicMeta && <span className="waveform-title__meta">{musicMeta}</span>}
+                  </div>
+                  <button
+                    type="button"
+                    className="control-button button-ghost waveform-toggle"
+                    onClick={() => setShowMusicWave((v) => !v)}
+                  >
+                    {showMusicWave ? "Hide waveform" : "Show waveform"}
+                  </button>
                 </div>
-              )}
-            </div>
+                {showMusicWave && (
+                  <div className="waveform-plot">
+                    <WaveformPlot buffer={musicBuffer} color="#5ac8fa" title={musicName || "Music"} />
+                  </div>
+                )}
+              </div>
+            </>
           )}
         </div>
         <div className="file-card-stack">
@@ -130,26 +146,49 @@ export default function FileInputs({ onPickMusic, onPickIR, musicBuffer, musicNa
             <input className="file-card__input" type="file" accept=".wav,audio/wav" onChange={onPickIR} />
           </label>
           {irBuffer && (
-            <div className="waveform-section">
-              <div className="waveform-header">
-                <span className="waveform-title">{irName || "Impulse response"}</span>
-                <button
-                  type="button"
-                  className="control-button button-ghost waveform-toggle"
-                  onClick={() => setShowIrWave((v) => !v)}
-                >
-                  {showIrWave ? "Hide waveform" : "Show waveform"}
-                </button>
+            <>
+              <div className="file-status" aria-live="polite">
+                <span className="file-status__label">Selected file</span>
+                <span className="file-status__value" title={irName || "Impulse response"}>
+                  {irName || "Impulse response"}
+                </span>
+                {irMeta && <span className="file-status__meta">{irMeta}</span>}
               </div>
-              {showIrWave && (
-                <div className="waveform-plot">
-                  <WaveformPlot buffer={irBuffer} color="#ff9f0a" title={irName || "Impulse response"} />
+              <div className="waveform-section">
+                <div className="waveform-header">
+                  <div className="waveform-title">
+                    <span className="waveform-title__name" title={irName || "Impulse response"}>
+                      {irName || "Impulse response"}
+                    </span>
+                    {irMeta && <span className="waveform-title__meta">{irMeta}</span>}
+                  </div>
+                  <button
+                    type="button"
+                    className="control-button button-ghost waveform-toggle"
+                    onClick={() => setShowIrWave((v) => !v)}
+                  >
+                    {showIrWave ? "Hide waveform" : "Show waveform"}
+                  </button>
                 </div>
-              )}
-            </div>
+                {showIrWave && (
+                  <div className="waveform-plot">
+                    <WaveformPlot buffer={irBuffer} color="#ff9f0a" title={irName || "Impulse response"} />
+                  </div>
+                )}
+              </div>
+            </>
           )}
         </div>
       </div>
     </section>
   );
+}
+
+function formatBufferMeta(buffer: AudioBuffer | null) {
+  if (!buffer) return null;
+  const durationSeconds = buffer.duration;
+  const sampleRate = Math.round(buffer.sampleRate);
+  const channels = buffer.numberOfChannels;
+  const channelLabel = channels === 1 ? "Mono" : channels === 2 ? "Stereo" : `${channels} ch`;
+  return `${durationSeconds.toFixed(2)} s | ${sampleRate.toLocaleString()} Hz | ${channelLabel}`;
 }
