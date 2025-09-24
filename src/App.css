@@ -895,6 +895,9 @@
 
 .frpink-controls {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
   justify-content: flex-start;
   margin-bottom: 12px;
 }
