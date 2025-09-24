@@ -132,7 +132,7 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     gainRef.current = null;
   }
 
-  function makeGraph(at: number) {
+  function makeGraph(at: number, playbackMode: Mode = mode) {
     const ctx = ensureCtx();
     const music = musicBufRef.current;
     if (!music) {
@@ -142,11 +142,12 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
 
     const src = new AudioBufferSourceNode(ctx, { buffer: music });
     const matchValue = Math.max(convolvedMatchGain, 1e-6);
-    const volume = new GainNode(ctx, { gain: mode === "convolved" ? convolvedVol : originalVol });
+    const initialGain = playbackMode === "convolved" ? convolvedVol : originalVol;
+    const volume = new GainNode(ctx, { gain: initialGain });
     srcRef.current = src;
     gainRef.current = volume;
 
-    if (mode === "convolved") {
+    if (playbackMode === "convolved") {
       const ir = irBufRef.current;
       if (!ir) {
         setStatus("No IR loaded.");
@@ -165,10 +166,11 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     } else {
       convolverLatencyRef.current = 0;
       matchGainRef.current = null;
+      convRef.current = null;
       src.connect(volume).connect(ctx.destination);
     }
 
-    const latency = mode === "convolved" ? convolverLatencyRef.current : 0;
+    const latency = playbackMode === "convolved" ? convolverLatencyRef.current : 0;
     const startAt = Math.max(0, at - latency);
     src.start(0, startAt);
     startTimeRef.current = ctx.currentTime;
@@ -183,7 +185,7 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
 
   function playPause() {
     if (!isPlaying) {
-      makeGraph(startOffsetRef.current);
+      makeGraph(startOffsetRef.current, mode);
     } else {
       const off = currentOffset();
       teardownGraph();
@@ -200,20 +202,12 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
 
   function onChangeMode(next: Mode) {
     if (next === mode) return;
-    const off = isPlaying ? currentOffset() : startOffsetRef.current;
+    const wasPlaying = isPlaying;
+    const off = wasPlaying ? currentOffset() : startOffsetRef.current;
     teardownGraph();
     setMode(next);
     startOffsetRef.current = off;
-    if (gainRef.current) {
-      gainRef.current.gain.value = next === "convolved" ? convolvedVol : originalVol;
-    }
-    if (matchGainRef.current) {
-      matchGainRef.current.gain.value = convolvedMatchGain;
-    }
-    if (next === "original" && gainRef.current) {
-      gainRef.current.gain.value = originalVol;
-    }
-    if (isPlaying) makeGraph(off);
+    if (wasPlaying) makeGraph(off, next);
   }
 
   function onChangeOriginalVol(v: number) {
