@@ -1,5 +1,5 @@
 // WHY: Presents the pink-noise frequency response UI and coordinates DSP worker requests.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
 import Plotly from "plotly.js-dist-min";
 import createPlotlyComponent from "react-plotly.js/factory";
@@ -48,6 +48,12 @@ const smoothingOptions: Array<{ value: SmoothingMode; label: string }> = [
   { value: "1/3", label: "1/3 octave" },
 ];
 
+const MIN_FREQ = 20;
+const MAX_FREQ = 20000;
+const LOG_MIN = Math.log10(MIN_FREQ);
+const LOG_MAX = Math.log10(MAX_FREQ);
+const DEFAULT_LOG_RANGE: [number, number] = [LOG_MIN, LOG_MAX];
+
 export default function FRPink({ irBuffer, sampleRate, label }: Props) {
   const [smoothing, setSmoothing] = useState<SmoothingMode>("1/6");
   const [showTransfer, setShowTransfer] = useState(false);
@@ -59,6 +65,61 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
   const workerRef = useRef<Worker | null>(null);
   const requestIdRef = useRef(0);
   const activeRequestRef = useRef(0);
+  const pendingRenderRef = useRef(false);
+
+  const createBaseLayout = useCallback(
+    () =>
+      ({
+        autosize: true,
+        paper_bgcolor: "rgba(0,0,0,0)",
+        plot_bgcolor: "rgba(28,28,30,0.6)",
+        font: { color: "#f2f2f7", family: "Inter, system-ui, sans-serif" },
+        margin: { l: 64, r: 24, t: 24, b: 64 },
+        hovermode: "x unified" as const,
+        hoverlabel: {
+          bgcolor: "rgba(20,20,22,0.92)",
+          bordercolor: "rgba(255,255,255,0.25)",
+          font: { color: "#f5f5f7" },
+        },
+        legend: {
+          orientation: "h" as const,
+          yanchor: "bottom" as const,
+          y: -0.25,
+          x: 0,
+          xanchor: "left" as const,
+          font: { size: 12, color: "#f5f5f7" },
+        },
+        xaxis: {
+          type: "log" as const,
+          range: [...DEFAULT_LOG_RANGE],
+          autorange: false,
+          dtick: 1,
+          title: { text: "Frequency (Hz)", font: { color: "#f5f5f7" } },
+          showgrid: true,
+          gridcolor: "rgba(255,255,255,0.12)",
+          tickfont: { size: 12, color: "#f5f5f7" },
+          ticks: "outside" as const,
+          tickcolor: "rgba(255,255,255,0.35)",
+          ticklen: 6,
+          fixedrange: false,
+        },
+        yaxis: {
+          autorange: true,
+          title: { text: "Magnitude (dB)", font: { color: "#f5f5f7" } },
+          showgrid: true,
+          gridcolor: "rgba(255,255,255,0.12)",
+          tickfont: { size: 12, color: "#f5f5f7" },
+          zeroline: true,
+          zerolinecolor: "rgba(255,255,255,0.35)",
+        },
+      }) as PlotLayout,
+    []
+  );
+
+  const [layout, setLayout] = useState<PlotLayout>(() => createBaseLayout());
+  const resetAxes = useCallback(() => {
+    setLayout(createBaseLayout());
+  }, [createBaseLayout]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -71,11 +132,13 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
       if (!data) return;
       if (data.type === "fr-result") {
         if (data.requestId !== activeRequestRef.current) return;
+        pendingRenderRef.current = true;
         setSpectra(data.payload);
-        setLoading(false);
         setError(null);
       } else if (data.type === "fr-error") {
         if (data.requestId !== activeRequestRef.current) return;
+        pendingRenderRef.current = false;
+        setSpectra(null);
         setLoading(false);
         setError(data.error);
       }
@@ -98,6 +161,7 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
 
     const requestId = ++requestIdRef.current;
     activeRequestRef.current = requestId;
+    pendingRenderRef.current = false;
     setLoading(true);
     setError(null);
 
@@ -124,14 +188,18 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
       hovertemplate: "<b>%{text}</b><br>%{x:.0f} Hz<br>%{y:.2f} dB<extra></extra>",
     };
 
+    const freqs = Array.from(spectra.freqs);
+    const sanitizedFreqs = freqs.map((hz) => (hz > 0 ? hz : MIN_FREQ));
+    const makeText = (label: string) => Array.from({ length: sanitizedFreqs.length }, () => label);
+
     const items: PlotDatum[] = [
       {
         type: "scatter" as const,
         mode: "lines" as const,
         name: "Pink noise",
-        x: spectra.freqs,
+        x: sanitizedFreqs,
         y: spectra.pinkDb,
-        text: Array.from({ length: spectra.freqs.length }, () => "Pink noise"),
+        text: makeText("Pink noise"),
         line: { color: "#ff9f0a", width: 1.5 },
         ...baseStyle,
       } as PlotDatum,
@@ -142,9 +210,9 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
         type: "scatter" as const,
         mode: "lines" as const,
         name: spectra.irLabel ? `Convolved (${spectra.irLabel})` : "Convolved",
-        x: spectra.freqs,
+        x: sanitizedFreqs,
         y: spectra.convolvedDb,
-        text: Array.from({ length: spectra.freqs.length }, () => "Convolved"),
+        text: makeText("Convolved"),
         line: { color: "#0a84ff", width: 1.5 },
         ...baseStyle,
       } as PlotDatum);
@@ -155,9 +223,9 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
         type: "scatter" as const,
         mode: "lines" as const,
         name: "Transfer",
-        x: spectra.freqs,
+        x: sanitizedFreqs,
         y: spectra.transferDb,
-        text: Array.from({ length: spectra.freqs.length }, () => "Transfer"),
+        text: makeText("Transfer"),
         line: { color: "#ffd60a", width: 1.3, dash: "dot" },
         ...baseStyle,
       } as PlotDatum);
@@ -166,38 +234,34 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
     return items as PlotDataArray;
   }, [spectra, showTransfer]);
 
-  const layout = useMemo<PlotLayout>(
-    () =>
-      ({
-        autosize: true,
-        height: 480,
-        margin: { t: 24, r: 20, l: 48, b: 48 },
-        paper_bgcolor: "rgba(0,0,0,0)",
-        plot_bgcolor: "rgba(28,28,30,0.6)",
-        font: { color: "#f2f2f7", family: "Inter, system-ui, sans-serif", size: 12 },
-        xaxis: {
-          title: { text: "Frequency (Hz)" },
-          type: "log" as const,
-          autorange: true,
-          zeroline: false,
-          showgrid: true,
-          gridcolor: "rgba(255,255,255,0.12)",
-          tickfont: { size: 12 },
-          rangeslider: { visible: false },
-          minor: { ticklen: 4, showgrid: false },
-        },
-        yaxis: {
-          title: { text: "Magnitude (dB)" },
-          autorange: true,
-          showgrid: true,
-          gridcolor: "rgba(255,255,255,0.12)",
-          zeroline: true,
-          zerolinecolor: "rgba(255,255,255,0.3)",
-          tickfont: { size: 12 },
-        },
-      }) as PlotLayout,
-    []
-  );
+  useEffect(() => {
+    if (!spectra) return;
+    resetAxes();
+  }, [spectra, resetAxes]);
+
+  const handleRelayout = (eventData: Partial<Record<string, unknown>>) => {
+    if (!eventData) return;
+    const xAuto = eventData["xaxis.autorange"] === true;
+    const yAuto = eventData["yaxis.autorange"] === true;
+    const xMin = eventData["xaxis.range[0]"];
+    const xMax = eventData["xaxis.range[1]"];
+    const outOfRange =
+      typeof xMin === "number" && typeof xMax === "number" && (xMin < LOG_MIN || xMax > LOG_MAX);
+    if (xAuto || outOfRange) {
+      resetAxes();
+      return;
+    }
+    if (yAuto) {
+      resetAxes();
+    }
+  };
+
+  const handleAfterPlot = () => {
+    if (pendingRenderRef.current) {
+      pendingRenderRef.current = false;
+      setLoading(false);
+    }
+  };
 
   const config = useMemo<PlotConfig>(
     () =>
@@ -205,6 +269,8 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
         responsive: true,
         displaylogo: false,
         scrollZoom: true,
+        displayModeBar: true,
+        modeBarButtonsToRemove: ["select2d", "lasso2d"],
         toImageButtonOptions: {
           format: "png" as const,
           filename: "fr-pink-response",
@@ -251,20 +317,26 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
   return (
     <div className="frpink">
       <div className="frpink-controls">
-        <label className="frpink-control">
-          <span className="frpink-control__label">Smoothing</span>
-          <select
-            className="frpink-control__select"
-            value={smoothing}
-            onChange={(e) => setSmoothing(e.target.value as SmoothingMode)}
-          >
-            {smoothingOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="frpink-segment">
+          <span className="frpink-segment__label">Smoothing</span>
+          <div className="frpink-segment__control" role="radiogroup" aria-label="Smoothing amount">
+            {smoothingOptions.map((option) => {
+              const isActive = smoothing === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={isActive}
+                  className={`frpink-segment__button${isActive ? " is-active" : ""}`}
+                  onClick={() => setSmoothing(option.value)}
+                >
+                  {option.label.replace(" octave", "")}
+                </button>
+              );
+            })}
+          </div>
+        </div>
         <label className="frpink-checkbox">
           <input
             type="checkbox"
@@ -284,22 +356,29 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
       </div>
 
       {error && <div className="frpink-message frpink-message--error">{error}</div>}
-      {isLoading && <div className="frpink-message">Analyzing 30 s of pink noise.</div>}
       {!isLoading && spectra && !spectra.hasIR && (
         <div className="frpink-message">Load an impulse response to compare the overlay.</div>
       )}
 
       <div className="frpink-plot">
         {isLoading && (
-          <div className="frplot-loader" role="status" aria-live="polite">
-            <div className="frplot-loader__progress">
-              <div className="frplot-loader__bar" />
+          <div className="frplot-progress" role="status" aria-live="polite">
+            <div className="frplot-progress__track">
+              <div className="frplot-progress__bar" />
             </div>
-            <span className="frplot-loader__text">Simulating pink-noise response...</span>
+            <span className="frplot-progress__label">Preparing pink-noise response</span>
           </div>
         )}
         {spectra ? (
-          <Plot data={traces} layout={layout} config={config} useResizeHandler style={{ width: "100%", height: "100%" }} />
+          <Plot
+            data={traces}
+            layout={layout}
+            config={config}
+            useResizeHandler
+            style={{ width: "100%", height: "100%", minHeight: 320 }}
+            onRelayout={handleRelayout}
+            onAfterPlot={handleAfterPlot}
+          />
         ) : (
           !isLoading && <div className="frpink-placeholder">Generating baseline pink-noise response.</div>
         )}
