@@ -82,7 +82,38 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
     []
   );
 
-  const [Plot, setPlot] = useState<unknown>(null);
+  const [Plot, setPlot] = useState<React.ComponentType<{
+    data: Array<{
+      type: string;
+      mode: string;
+      name: string;
+      line: { color: string; width: number; shape: string };
+      hovertemplate: string;
+      x: Float32Array;
+      y: Float32Array;
+    }>;
+    layout: {
+      autosize: boolean;
+      height: number;
+      margin: { t: number; r: number; l: number; b: number };
+      paper_bgcolor: string;
+      plot_bgcolor: string;
+      font: { color: string; family: string; size: number };
+      showlegend: boolean;
+      xaxis: Record<string, unknown>;
+      yaxis: Record<string, unknown>;
+    };
+    config: {
+      responsive: boolean;
+      displaylogo: boolean;
+      scrollZoom: boolean;
+      toImageButtonOptions: Record<string, unknown>;
+    };
+    useResizeHandler?: boolean;
+    style?: React.CSSProperties;
+    onHover?: (event: React.MouseEvent<HTMLDivElement>) => void;
+    onClick?: (event: React.MouseEvent<HTMLDivElement>) => void;
+  }> | null>(null);
 
   useEffect(() => {
     const loadPlotly = async () => {
@@ -98,7 +129,15 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
     return <div>Loading Plotly...</div>;
   }
 
-  return <Plot data={data} layout={layout} config={config} useResizeHandler style={{ width: "100%", height: "100%" }} />;
+  return (
+    <Plot
+      data={data}
+      layout={layout}
+      config={config}
+      useResizeHandler
+      style={{ width: "100%", height: "100%" }}
+    />
+  );
 }
 
 function downsampleBuffer(buffer: AudioBuffer) {
