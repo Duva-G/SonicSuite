@@ -1,4 +1,4 @@
-﻿// WHY: Renders the playback frequency response overlaying dry and convolved music.
+// WHY: Renders the playback frequency response overlaying dry and convolved music.
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
 import Plotly from "plotly.js-dist-min";
@@ -140,6 +140,14 @@ export default function FRPlayback({ musicBuffer, irBuffer, sampleRate }: Props)
     if (!spectra) return [] as PlotDataArray;
     const baseHover = "<b>%{x:.0f} Hz</b><br>%{y:.2f} dB<extra></extra>";
     const freqs = Array.from(spectra.freqs);
+    const series: number[][] = [Array.from(spectra.dryDb)];
+
+    if (spectra.hasIR && spectra.wetDb) {
+      series.push(Array.from(spectra.wetDb));
+    }
+
+    const { arrays } = normalizePlaybackSeries(series);
+    const dryNormalized = arrays[0] ?? [];
     const result: PlotDatum[] = [
       {
         type: "scatter",
@@ -147,25 +155,26 @@ export default function FRPlayback({ musicBuffer, irBuffer, sampleRate }: Props)
         name: "Original (music)",
         hovertemplate: baseHover,
         x: freqs,
-        y: Array.from(spectra.dryDb),
+        y: dryNormalized,
         line: { color: "#5ac8fa", width: 2 },
       } as PlotDatum,
     ];
 
-    if (spectra.hasIR && spectra.wetDb) {
+    if (spectra.hasIR && arrays[1]) {
       result.push({
         type: "scatter",
         mode: "lines",
         name: "Convolved",
         hovertemplate: baseHover,
         x: freqs,
-        y: Array.from(spectra.wetDb),
+        y: arrays[1],
         line: { color: "#ff9f0a", width: 2 },
       } as PlotDatum);
     }
 
     return result as PlotDataArray;
   }, [spectra]);
+
 
   const layout = useMemo<PlotLayout>(
     () =>
@@ -203,7 +212,7 @@ export default function FRPlayback({ musicBuffer, irBuffer, sampleRate }: Props)
         },
         yaxis: {
           autorange: true,
-          autorangeoptions: { clipmin: -30, clipmax: 30 },
+          autorangeoptions: { clipmin: -60, clipmax: 0 },
           title: { text: "Magnitude (dB)", font: { color: "#f5f5f7" } },
           showgrid: true,
           gridcolor: "rgba(255,255,255,0.12)",
@@ -297,4 +306,50 @@ function serializeBuffer(buffer: AudioBuffer, label: string) {
     }
   }
   return { data: mono, sampleRate: buffer.sampleRate, label };
+}
+
+function normalizePlaybackSeries(series: number[][]): { arrays: number[][] } {
+  if (series.length === 0) {
+    return { arrays: [] };
+  }
+
+  let peak = Number.NEGATIVE_INFINITY;
+  for (const arr of series) {
+    for (let i = 0; i < arr.length; i++) {
+      const value = arr[i];
+      if (!Number.isFinite(value)) continue;
+      if (value > peak) peak = value;
+    }
+  }
+
+  if (!Number.isFinite(peak)) {
+    peak = 0;
+  }
+
+  let min = Number.POSITIVE_INFINITY;
+  const centered = series.map((source) => {
+    const normalized: number[] = new Array(source.length);
+    for (let i = 0; i < source.length; i++) {
+      const value = source[i];
+      const normalizedValue = Number.isFinite(value) ? value - peak : Number.NaN;
+      normalized[i] = normalizedValue;
+      if (Number.isFinite(normalizedValue) && normalizedValue < min) {
+        min = normalizedValue;
+      }
+    }
+    return normalized;
+  });
+
+  const offset = Number.isFinite(min) ? -min : 0;
+
+  return {
+    arrays: centered.map((source) => {
+      const shifted: number[] = new Array(source.length);
+      for (let i = 0; i < source.length; i++) {
+        const value = source[i];
+        shifted[i] = Number.isFinite(value) ? Math.max(0, value + offset) : Number.NaN;
+      }
+      return shifted;
+    }),
+  };
 }

@@ -18,15 +18,12 @@
   backdrop-filter: blur(42px) saturate(1.35);
 }
 
-
-
 .app-logo {
   height: 40px;
   width: auto;
   display: block;
   filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.32));
 }
-
 
 .app-header {
   display: flex;
@@ -505,6 +502,78 @@
   outline-offset: 2px;
 }
 
+.frplot-loader {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+  border-radius: 18px;
+  background: rgba(20, 20, 22, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
 
+.frplot-loader__progress {
+  width: 160px;
+  max-width: 50%;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+  position: relative;
+}
 
+.frplot-loader__bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 45%;
+  max-width: 90%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(10, 132, 255, 0.8), rgba(255, 149, 0, 0.85));
+  animation: frplot-loader-pulse 1.2s ease-in-out infinite;
+}
+
+.frplot-loader__bar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(10, 132, 255, 0), rgba(255, 255, 255, 0.45), rgba(255, 149, 0, 0));
+  opacity: 0.6;
+  animation: frplot-loader-sheen 1.2s ease-in-out infinite;
+}
+
+.frplot-loader__text {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: rgba(235, 235, 245, 0.78);
+  white-space: nowrap;
+}
+
+@keyframes frplot-loader-pulse {
+  0%, 100% {
+    transform: scaleX(0.65);
+    transform-origin: left;
+  }
+  50% {
+    transform: scaleX(1);
+    transform-origin: right;
+  }
+}
+
+@keyframes frplot-loader-sheen {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
+}
 

@@ -214,11 +214,22 @@ async function computeBaseSpectra(
     irData = irData.slice();
   }
 
+  irData = normalizeImpulseResponse(irData);
+
   const convolvedFull = convolveFFT(pink, irData);
   const convolved =
     convolvedFull.length >= pink.length
       ? convolvedFull.subarray(0, pink.length)
       : padToLength(convolvedFull, pink.length);
+
+  const pinkRms = computeRms(pink);
+  const convRms = computeRms(convolved);
+  if (convRms > EPS) {
+    const gain = pinkRms / convRms;
+    for (let i = 0; i < convolved.length; i++) {
+      convolved[i] *= gain;
+    }
+  }
 
   const pair = welchPair(pink, convolved, sampleRate);
   const limited = limitFrequencyRange(pair.freqs, 20, 20000, [pair.psdX, pair.psdY, pair.transfer]);
@@ -267,10 +278,21 @@ async function computePlaybackSpectra(
     irData = irData.slice();
   }
 
+  irData = normalizeImpulseResponse(irData);
+
   const wetFull = convolveFFT(dry, irData);
   const dryLength = dry.length;
   const wetTrimmed = new Float32Array(dryLength);
   wetTrimmed.set(wetFull.subarray(0, dryLength));
+
+  const dryRms = computeRms(dry);
+  const wetRms = computeRms(wetTrimmed);
+  if (wetRms > EPS) {
+    const gain = dryRms / wetRms;
+    for (let i = 0; i < wetTrimmed.length; i++) {
+      wetTrimmed[i] *= gain;
+    }
+  }
 
   const pair = welchPair(dry, wetTrimmed, sampleRate);
   const limited = limitFrequencyRange(pair.freqs, 20, 20000, [pair.psdX, pair.psdY]);
@@ -601,6 +623,38 @@ function padToLength(data: Float32Array, length: number): Float32Array {
 
 function nextPow2(value: number): number {
   return 1 << Math.ceil(Math.log2(value));
+}
+
+
+function computeRms(data: Float32Array): number {
+  if (data.length === 0) return 0;
+  let sumSquares = 0;
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i];
+    sumSquares += v * v;
+  }
+  return Math.sqrt(sumSquares / data.length);
+}
+
+function normalizeImpulseResponse(data: Float32Array): Float32Array {
+  if (data.length === 0) return data;
+  let sumSquares = 0;
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i];
+    sumSquares += v * v;
+  }
+  if (sumSquares <= 0) {
+    return data;
+  }
+  const l2Norm = Math.sqrt(sumSquares);
+  if (!Number.isFinite(l2Norm) || l2Norm <= 0) {
+    return data;
+  }
+  const gain = 1 / l2Norm;
+  for (let i = 0; i < data.length; i++) {
+    data[i] *= gain;
+  }
+  return data;
 }
 
 function resampleLinear(data: Float32Array, srcRate: number, dstRate: number): Float32Array {

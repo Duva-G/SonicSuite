@@ -253,8 +253,11 @@ export default function FRDifference({ musicBuffer, irBuffer, sampleRate }: Prop
 
       <div className="frpink-plot">
         {isLoading && (
-          <div className="frplot-spinner">
-            <div className="frplot-spinner__circle" />
+          <div className="frplot-loader" role="status" aria-live="polite">
+            <div className="frplot-loader__progress">
+              <div className="frplot-loader__bar" />
+            </div>
+            <span className="frplot-loader__text">Calculating difference curve...</span>
           </div>
         )}
         {trace && (

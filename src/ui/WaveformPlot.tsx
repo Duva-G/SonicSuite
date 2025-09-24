@@ -1,15 +1,5 @@
 ﻿// WHY: Renders a down-sampled waveform view for audio buffers.
-import { useMemo } from "react";
-import type { ComponentProps } from "react";
-import Plotly from "plotly.js-dist-min";
-import createPlotlyComponent from "react-plotly.js/factory";
-
-const Plot = createPlotlyComponent(Plotly);
-type PlotComponentProps = ComponentProps<typeof Plot>;
-type PlotDataArray = NonNullable<PlotComponentProps["data"]>;
-type PlotDatum = PlotDataArray[number];
-type PlotLayout = NonNullable<PlotComponentProps["layout"]>;
-type PlotConfig = NonNullable<PlotComponentProps["config"]>;
+import { useEffect, useState, useMemo } from "react";
 
 type Props = {
   buffer: AudioBuffer;
@@ -22,49 +12,60 @@ const MAX_POINTS = 4000;
 export default function WaveformPlot({ buffer, color, title }: Props) {
   const { times, samples } = useMemo(() => downsampleBuffer(buffer), [buffer]);
 
-  const data = useMemo<PlotDataArray>(
-    () =>
-      [
-        {
-          type: "scatter",
-          mode: "lines",
-          name: title,
-          hovertemplate: "<b>%{x:.3f}s</b><br>%{y:.3f}<extra></extra>",
-          x: times,
-          y: samples,
-          line: { color, width: 1.6 },
-        } as PlotDatum,
-      ] as PlotDataArray,
+  const data = useMemo(
+    () => [
+      {
+        type: "scatter",
+        mode: "lines",
+        name: title,
+        line: { 
+          color, 
+          width: 1.5,
+          shape: 'linear'
+        },
+        hovertemplate: "<b>%{x:.3f}s</b><br>%{y:.6f}<extra></extra>",
+        x: times,
+        y: samples,
+      },
+    ],
     [times, samples, color, title]
   );
 
-  const layout = useMemo<PlotLayout>(
+  const layout = useMemo(
     () =>
       ({
         autosize: true,
-        height: 260,
-        margin: { t: 24, r: 20, l: 48, b: 36 },
-        paper_bgcolor: "rgba(0,0,0,0)",
-        plot_bgcolor: "rgba(28,28,30,0.6)",
-        font: { color: "#f2f2f7", family: "Inter, system-ui, sans-serif", size: 12 },
+        height: 200,
+        margin: { t: 30, r: 20, l: 50, b: 30 },
+        paper_bgcolor: "transparent",
+        plot_bgcolor: "transparent",
+        font: { 
+          color: "rgba(235, 235, 245, 0.7)", 
+          family: "Inter, system-ui, sans-serif", 
+          size: 11 
+        },
+        showlegend: false,
         xaxis: {
           title: "Time (s)",
-          zeroline: false,
+          zeroline: true,
           showgrid: true,
-          gridcolor: "rgba(255,255,255,0.11)",
+          gridcolor: "rgba(255,255,255,0.1)",
+          zerolinecolor: "rgba(255,255,255,0.2)",
+          tickfont: { size: 11 },
         },
         yaxis: {
           title: "Amplitude",
+          autorange: true,
           showgrid: true,
-          gridcolor: "rgba(255,255,255,0.11)",
-          zeroline: true,
+          gridcolor: "rgba(255,255,255,0.1)",
           zerolinecolor: "rgba(255,255,255,0.3)",
+          tickfont: { size: 11 },
         },
-      }) as PlotLayout,
+      }),
     []
   );
 
-  const config = useMemo<PlotConfig>(
+  const config = useMemo(
     () =>
       ({
         responsive: true,
@@ -77,9 +78,25 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
           width: 1200,
           scale: 2,
         },
-      }) as PlotConfig,
+      }),
     []
   );
+
+  const [Plot, setPlot] = useState<unknown>(null);
+
+  useEffect(() => {
+    const loadPlotly = async () => {
+      const Plotly = await import("plotly.js-dist-min");
+      const createPlotlyComponent = (await import("react-plotly.js/factory")).default;
+      setPlot(() => createPlotlyComponent(Plotly));
+    };
+
+    loadPlotly();
+  }, []);
+
+  if (!Plot) {
+    return <div>Loading Plotly...</div>;
+  }
 
   return <Plot data={data} layout={layout} config={config} useResizeHandler style={{ width: "100%", height: "100%" }} />;
 }
@@ -102,14 +119,19 @@ function downsampleBuffer(buffer: AudioBuffer) {
 
   let writeIndex = 0;
   for (let i = 0; i < length; i += step) {
-    let sum = 0;
-    let count = 0;
+    let maxVal = -Infinity;
+    let minVal = Infinity;
     const end = Math.min(length, i + step);
+    
+    // Find min and max in this chunk
     for (let j = i; j < end; j++) {
-      sum += mono[j];
-      count++;
+      const val = mono[j];
+      maxVal = Math.max(maxVal, val);
+      minVal = Math.min(minVal, val);
     }
-    samples[writeIndex] = count ? sum / count : 0;
+    
+    // Store the value that has the largest magnitude
+    samples[writeIndex] = Math.abs(maxVal) > Math.abs(minVal) ? maxVal : minVal;
     times[writeIndex] = i / sampleRate;
     writeIndex++;
   }
