@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import FileInputs from "./ui/FileInputs";
 import Transport from "./ui/Transport";
 import ModeBar from "./ui/ModeBar";
@@ -27,6 +27,7 @@ export default function App() {
   const startOffsetRef = useRef(0);
 
   const [isPlaying, setPlaying] = useState(false);
+  const [playbackPosition, setPlaybackPosition] = useState<number>(0);
   const [mode, setMode] = useState<Mode>("original");
   const [originalVol, setOriginalVol] = useState<number>(1.0);
   const [convolvedVol, setConvolvedVol] = useState<number>(1.0);
@@ -38,9 +39,14 @@ export default function App() {
   const [irOriginal, setIrOriginal] = useState<AudioBuffer | null>(null);
   const [irBuffer, setIrBuffer] = useState<AudioBuffer | null>(null);
   const [convolvedMatchGain, setConvolvedMatchGain] = useState<number>(1);
+  const [isConvolvedGainMatched, setConvolvedGainMatched] = useState(false);
   const [isMatchingRms, setMatchingRms] = useState(false);
   const [musicName, setMusicName] = useState<string>("");
   const [irName, setIrName] = useState<string>("");
+
+  const transportDuration = musicBufRef.current?.duration ?? 0;
+  const clampedPlaybackPosition = Math.min(playbackPosition, transportDuration || 0);
+
 
   function ensureCtx(): AudioContext {
     if (!audioCtxRef.current) {
@@ -65,11 +71,17 @@ export default function App() {
       setMusicBuffer(buf);
       setMusicName(f.name);
       setSessionSampleRate(buf.sampleRate);
+      setConvolvedGainMatched(false);
+      startOffsetRef.current = 0;
+      setPlaybackPosition(0);
       setStatus(`Music loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(2)} s`);
     } catch (err) {
       musicBufRef.current = null;
       setMusicBuffer(null);
       setMusicName("");
+      setConvolvedGainMatched(false);
+      startOffsetRef.current = 0;
+      setPlaybackPosition(0);
       setStatus(`Music load failed: ${(err as Error).message}`);
     }
   }
@@ -85,6 +97,7 @@ export default function App() {
       setIrBuffer(buf);
       setIrName(f.name);
       setConvolvedMatchGain(1);
+      setConvolvedGainMatched(false);
       if (matchGainRef.current) {
         matchGainRef.current.gain.value = 1;
       }
@@ -105,6 +118,7 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
       setIrBuffer(null);
       setIrName("");
       setConvolvedMatchGain(1);
+      setConvolvedGainMatched(false);
       if (matchGainRef.current) {
         matchGainRef.current.gain.value = 1;
       }
@@ -117,6 +131,9 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
   }
 
   function teardownGraph() {
+    if (srcRef.current) {
+      srcRef.current.onended = null;
+    }
     try {
       srcRef.current?.stop();
     } catch (err: unknown) {
@@ -146,6 +163,8 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     const volume = new GainNode(ctx, { gain: initialGain });
     srcRef.current = src;
     gainRef.current = volume;
+    startOffsetRef.current = at;
+    setPlaybackPosition(Math.min(at, music.duration));
 
     if (playbackMode === "convolved") {
       const ir = irBufRef.current;
@@ -170,6 +189,14 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
       src.connect(volume).connect(ctx.destination);
     }
 
+    src.onended = () => {
+      if (srcRef.current !== src) return;
+      startOffsetRef.current = 0;
+      setPlaybackPosition(0);
+      setPlaying(false);
+      teardownGraph();
+    };
+
     const latency = playbackMode === "convolved" ? convolverLatencyRef.current : 0;
     const startAt = Math.max(0, at - latency);
     src.start(0, startAt);
@@ -183,13 +210,41 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     return startOffsetRef.current + (ctx.currentTime - startTimeRef.current);
   }
 
+  useEffect(() => {
+    let raf = 0;
+
+    const update = () => {
+      const music = musicBufRef.current;
+      const duration = music?.duration ?? 0;
+      const next = Math.min(currentOffset(), duration);
+      setPlaybackPosition(next);
+      raf = requestAnimationFrame(update);
+    };
+
+    if (isPlaying) {
+      raf = requestAnimationFrame(update);
+    } else {
+      const music = musicBufRef.current;
+      const duration = music?.duration ?? 0;
+      const clamped = Math.min(startOffsetRef.current, duration);
+      setPlaybackPosition(clamped);
+    }
+
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [isPlaying]);
+
   function playPause() {
     if (!isPlaying) {
       makeGraph(startOffsetRef.current, mode);
     } else {
-      const off = currentOffset();
+      const music = musicBufRef.current;
+      const duration = music?.duration ?? Infinity;
+      const off = Math.min(currentOffset(), duration);
       teardownGraph();
       startOffsetRef.current = off;
+      setPlaybackPosition(off);
       setPlaying(false);
     }
   }
@@ -197,17 +252,49 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
   function stopAll() {
     teardownGraph();
     startOffsetRef.current = 0;
+    setPlaybackPosition(0);
     setPlaying(false);
+  }
+
+  function seekTo(seconds: number, resume?: boolean) {
+    const music = musicBufRef.current;
+    if (!music) return;
+    const duration = music.duration;
+    const target = Math.max(0, Math.min(seconds, duration));
+    const wasPlaying = isPlaying;
+    const shouldResume = resume ?? wasPlaying;
+    if (wasPlaying) {
+      teardownGraph();
+      setPlaying(false);
+    }
+    startOffsetRef.current = target;
+    setPlaybackPosition(target);
+    if (shouldResume && target < duration) {
+      makeGraph(target, mode);
+    } else {
+      setPlaying(false);
+    }
+  }
+
+  function skipBy(delta: number) {
+    const music = musicBufRef.current;
+    if (!music) return;
+    const base = isPlaying ? currentOffset() : startOffsetRef.current;
+    seekTo(base + delta, isPlaying);
   }
 
   function onChangeMode(next: Mode) {
     if (next === mode) return;
     const wasPlaying = isPlaying;
     const off = wasPlaying ? currentOffset() : startOffsetRef.current;
+    const music = musicBufRef.current;
+    const duration = music?.duration ?? Infinity;
+    const clamped = Math.min(off, duration);
     teardownGraph();
     setMode(next);
-    startOffsetRef.current = off;
-    if (wasPlaying) makeGraph(off, next);
+    startOffsetRef.current = clamped;
+    setPlaybackPosition(clamped);
+    if (wasPlaying) makeGraph(clamped, next);
   }
 
   function onChangeOriginalVol(v: number) {
@@ -326,6 +413,7 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     irBufRef.current = buffer;
     setIrBuffer(buffer);
     setConvolvedMatchGain(1);
+    setConvolvedGainMatched(false);
     if (matchGainRef.current) {
       matchGainRef.current.gain.value = 1;
     }
@@ -373,6 +461,7 @@ ${message}`);
     }
 
     setMatchingRms(true);
+    setConvolvedGainMatched(false);
     try {
       const targetRate = audioCtxRef.current?.sampleRate ?? music.sampleRate;
       const dryBuffer = resampleAudioBuffer(music, targetRate);
@@ -393,6 +482,7 @@ ${message}`);
       if (!Number.isFinite(ratio) || ratio <= 0) ratio = 1;
       const clamped = Math.min(4, Math.max(0.1, ratio));
       setConvolvedMatchGain(clamped);
+      setConvolvedGainMatched(true);
       if (matchGainRef.current) {
         matchGainRef.current.gain.value = clamped;
       }
@@ -704,13 +794,13 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
               <div className="rms-match">
                 <button
                   type="button"
-                  className="control-button button-ghost"
+                  className={`control-button button-ghost rms-match__button${isConvolvedGainMatched ? " is-matched" : ""}`}
                   onClick={matchConvolvedRMS}
                   disabled={isMatchingRms || !canMatchRms}
+                  aria-pressed={isConvolvedGainMatched}
                 >
-                  {isMatchingRms ? "Matching..." : "Match RMS (Convolved)"}
+                  {isMatchingRms ? "Matching..." : isConvolvedGainMatched ? "RMS Matched" : "Match RMS (Convolved)"}
                 </button>
-                <span className="rms-match__info">Match gain: {convolvedMatchGain.toFixed(2)}x</span>
               </div>
               <Transport
                 isPlaying={isPlaying}
@@ -720,6 +810,11 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
                 onChangeOriginalVol={onChangeOriginalVol}
                 convolvedVol={convolvedVol}
                 onChangeConvolvedVol={onChangeConvolvedVol}
+                duration={transportDuration}
+                position={clampedPlaybackPosition}
+                onSeek={seekTo}
+                onSkipForward={() => skipBy(10)}
+                onSkipBackward={() => skipBy(-10)}
               />
             </section>
 
