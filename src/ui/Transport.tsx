@@ -14,9 +14,11 @@ type Props = {
   onSeek: (seconds: number) => void;
   onSkipForward: () => void;
   onSkipBackward: () => void;
+  onResetVolumes: () => void;
 };
 
 type SliderStyle = CSSProperties & { "--progress"?: string };
+type VolumeSliderStyle = CSSProperties & { "--volume-progress"?: string };
 
 function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) {
@@ -26,6 +28,41 @@ function formatTime(seconds: number): string {
   const mins = Math.floor(whole / 60);
   const secs = whole % 60;
   return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+const VOLUME_DB_MIN = -6;
+const VOLUME_DB_MAX = 6;
+const VOLUME_DB_RANGE = VOLUME_DB_MAX - VOLUME_DB_MIN;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function linearToDb(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return VOLUME_DB_MIN;
+  }
+  const db = 20 * Math.log10(value);
+  return clamp(db, VOLUME_DB_MIN, VOLUME_DB_MAX);
+}
+
+function dbToLinear(db: number): number {
+  const clamped = clamp(db, VOLUME_DB_MIN, VOLUME_DB_MAX);
+  return Math.pow(10, clamped / 20);
+}
+
+function formatDb(db: number): string {
+  const normalized = Math.abs(db) < 0.05 ? 0 : Math.round(db * 10) / 10;
+  const sign = normalized > 0 ? "+" : "";
+  return `${sign}${normalized.toFixed(1)} dB`;
+}
+
+type VolumeTone = "positive" | "negative" | "neutral";
+
+function getVolumeTone(db: number): VolumeTone {
+  if (db > 0.05) return "positive";
+  if (db < -0.05) return "negative";
+  return "neutral";
 }
 
 export default function Transport({
@@ -41,6 +78,7 @@ export default function Transport({
   onSeek,
   onSkipForward,
   onSkipBackward,
+  onResetVolumes,
 }: Props) {
   const [isScrubbing, setScrubbing] = useState(false);
   const [pendingPosition, setPendingPosition] = useState(position);
@@ -70,6 +108,30 @@ export default function Transport({
     if (!isReady) return undefined;
     return { "--progress": `${progressPercent}%` };
   }, [isReady, progressPercent]);
+
+  const originalVolDb = useMemo(() => {
+    const db = linearToDb(originalVol);
+    return Math.round(db * 10) / 10;
+  }, [originalVol]);
+  const convolvedVolDb = useMemo(() => {
+    const db = linearToDb(convolvedVol);
+    return Math.round(db * 10) / 10;
+  }, [convolvedVol]);
+
+  const originalVolumeStyle = useMemo<VolumeSliderStyle>(() => {
+    const progress = ((originalVolDb - VOLUME_DB_MIN) / VOLUME_DB_RANGE) * 100;
+    const bounded = clamp(progress, 0, 100);
+    return { "--volume-progress": `${bounded}%` };
+  }, [originalVolDb]);
+
+  const convolvedVolumeStyle = useMemo<VolumeSliderStyle>(() => {
+    const progress = ((convolvedVolDb - VOLUME_DB_MIN) / VOLUME_DB_RANGE) * 100;
+    const bounded = clamp(progress, 0, 100);
+    return { "--volume-progress": `${bounded}%` };
+  }, [convolvedVolDb]);
+
+  const originalVolumeTone = useMemo(() => getVolumeTone(originalVolDb), [originalVolDb]);
+  const convolvedVolumeTone = useMemo(() => getVolumeTone(convolvedVolDb), [convolvedVolDb]);
 
   const handleScrubStart = () => {
     if (!isReady) return;
@@ -172,19 +234,39 @@ export default function Transport({
       </div>
 
       <div className="volume-group">
+        <div className="volume-group__header">
+          <span className="volume-group__caption">Volume (-6 dB to +6 dB)</span>
+          <button
+            type="button"
+            className="control-button button-ghost volume-reset-button"
+            onClick={onResetVolumes}
+          >
+            Reset Volumes
+          </button>
+        </div>
         <label className="volume-control">
           <span className="volume-label">Original Volume</span>
           <div className="volume-slider">
             <input
               className="volume-slider__input"
               type="range"
-              min={0}
-              max={2}
-              step={0.01}
-              value={originalVol}
-              onChange={(e) => onChangeOriginalVol(parseFloat(e.target.value))}
+              min={VOLUME_DB_MIN}
+              max={VOLUME_DB_MAX}
+              step={0.1}
+              value={originalVolDb}
+              onChange={(e) => onChangeOriginalVol(dbToLinear(Number(e.target.value)))}
+              aria-valuemin={VOLUME_DB_MIN}
+              aria-valuemax={VOLUME_DB_MAX}
+              aria-valuenow={originalVolDb}
+              aria-valuetext={formatDb(originalVolDb)}
+              style={originalVolumeStyle}
             />
-            <span className="volume-value">{originalVol.toFixed(2)}x</span>
+            <div className="volume-slider__labels" aria-hidden="true">
+              <span>-6 dB</span>
+              <span>0 dB</span>
+              <span>+6 dB</span>
+            </div>
+            <span className={`volume-value volume-value--${originalVolumeTone}`}>{formatDb(originalVolDb)}</span>
           </div>
         </label>
         <label className="volume-control">
@@ -193,16 +275,27 @@ export default function Transport({
             <input
               className="volume-slider__input"
               type="range"
-              min={0}
-              max={2}
-              step={0.01}
-              value={convolvedVol}
-              onChange={(e) => onChangeConvolvedVol(parseFloat(e.target.value))}
+              min={VOLUME_DB_MIN}
+              max={VOLUME_DB_MAX}
+              step={0.1}
+              value={convolvedVolDb}
+              onChange={(e) => onChangeConvolvedVol(dbToLinear(Number(e.target.value)))}
+              aria-valuemin={VOLUME_DB_MIN}
+              aria-valuemax={VOLUME_DB_MAX}
+              aria-valuenow={convolvedVolDb}
+              aria-valuetext={formatDb(convolvedVolDb)}
+              style={convolvedVolumeStyle}
             />
-            <span className="volume-value">{convolvedVol.toFixed(2)}x</span>
+            <div className="volume-slider__labels" aria-hidden="true">
+              <span>-6 dB</span>
+              <span>0 dB</span>
+              <span>+6 dB</span>
+            </div>
+            <span className={`volume-value volume-value--${convolvedVolumeTone}`}>{formatDb(convolvedVolDb)}</span>
           </div>
         </label>
       </div>
+
     </section>
   );
 }

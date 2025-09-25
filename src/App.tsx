@@ -311,6 +311,11 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     }
   }
 
+  function resetVolumes() {
+    onChangeOriginalVol(1);
+    onChangeConvolvedVol(1);
+  }
+
   function handleIrManualTrim(startMs: number, endMs: number) {
     const original = irOriginalRef.current;
     if (!original) {
@@ -810,6 +815,7 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
                 onChangeOriginalVol={onChangeOriginalVol}
                 convolvedVol={convolvedVol}
                 onChangeConvolvedVol={onChangeConvolvedVol}
+                onResetVolumes={resetVolumes}
                 duration={transportDuration}
                 position={clampedPlaybackPosition}
                 onSeek={seekTo}
