@@ -113,6 +113,27 @@ export default function Transport({
           <p className="panel-desc">Preview your mix, pause to tweak, and reset in a click.</p>
         </div>
       </div>
+      <div className="transport-progress">
+        <span className="transport-progress__time">{formatTime(displayPosition)}</span>
+        <input
+          className="transport-progress__slider"
+          type="range"
+          min={0}
+          max={duration || 0}
+          step={0.01}
+          value={Math.min(Math.max(displayPosition, 0), duration || 0)}
+          disabled={!isReady}
+          onPointerDown={handleScrubStart}
+          onPointerUp={handleSliderPointerUp}
+          onPointerCancel={handleSliderPointerUp}
+          onChange={(e) => handleScrubChange(e.target.value)}
+          onBlur={handleSliderBlur}
+          onKeyUp={handleSliderKeyUp}
+          style={sliderStyle}
+        />
+        <span className="transport-progress__time">{formatTime(duration)}</span>
+      </div>
+
       <div className="transport-controls">
         <div className="transport-controls__cluster">
           <button
@@ -149,26 +170,7 @@ export default function Transport({
           Stop
         </button>
       </div>
-      <div className="transport-progress">
-        <span className="transport-progress__time">{formatTime(displayPosition)}</span>
-        <input
-          className="transport-progress__slider"
-          type="range"
-          min={0}
-          max={duration || 0}
-          step={0.01}
-          value={Math.min(Math.max(displayPosition, 0), duration || 0)}
-          disabled={!isReady}
-          onPointerDown={handleScrubStart}
-          onPointerUp={handleSliderPointerUp}
-          onPointerCancel={handleSliderPointerUp}
-          onChange={(e) => handleScrubChange(e.target.value)}
-          onBlur={handleSliderBlur}
-          onKeyUp={handleSliderKeyUp}
-          style={sliderStyle}
-        />
-        <span className="transport-progress__time">{formatTime(duration)}</span>
-      </div>
+
       <div className="volume-group">
         <label className="volume-control">
           <span className="volume-label">Original Volume</span>
@@ -204,4 +206,3 @@ export default function Transport({
     </section>
   );
 }
-
