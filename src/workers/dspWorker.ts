@@ -3,7 +3,7 @@
 import FFT from "fft.js";
 const ctx = self as DedicatedWorkerGlobalScope;
 
-type SmoothingMode = "1/12" | "1/6" | "1/3";
+type SmoothingMode = "1/24" | "1/12" | "1/6" | "1/3";
 
 type ComputeMessage = {
   type: "compute-fr";
@@ -308,7 +308,8 @@ async function computePlaybackSpectra(
 }
 
 function applySmoothing(base: BaseSpectra, smoothing: SmoothingMode): BaseSpectra {
-  const fraction = smoothing === "1/12" ? 12 : smoothing === "1/6" ? 6 : 3;
+  const fraction =
+    smoothing === "1/24" ? 24 : smoothing === "1/12" ? 12 : smoothing === "1/6" ? 6 : 3;
   return {
     freqs: base.freqs,
     pinkDb: applyFractionalSmoothing(base.freqs, base.pinkDb, fraction),
@@ -324,7 +325,8 @@ function applySmoothing(base: BaseSpectra, smoothing: SmoothingMode): BaseSpectr
 }
 
 function applyPlaybackSmoothing(base: PlaybackSpectra, smoothing: SmoothingMode): PlaybackSpectra {
-  const fraction = smoothing === "1/12" ? 12 : smoothing === "1/6" ? 6 : 3;
+  const fraction =
+    smoothing === "1/24" ? 24 : smoothing === "1/12" ? 12 : smoothing === "1/6" ? 6 : 3;
   return {
     freqs: base.freqs,
     dryDb: applyFractionalSmoothing(base.freqs, base.dryDb, fraction),

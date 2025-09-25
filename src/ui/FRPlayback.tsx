@@ -4,7 +4,7 @@ import type { ComponentProps } from "react";
 import Plotly from "plotly.js-dist-min";
 import createPlotlyComponent from "react-plotly.js/factory";
 
-type SmoothingMode = "1/12" | "1/6" | "1/3";
+type SmoothingMode = "1/24" | "1/12" | "1/6" | "1/3";
 
 type WorkerResultPayload = {
   freqs: Float32Array;
@@ -47,6 +47,7 @@ const LOG_MAX = Math.log10(MAX_FREQ);
 const DEFAULT_LOG_RANGE: [number, number] = [LOG_MIN, LOG_MAX];
 
 const smoothingOptions: Array<{ value: SmoothingMode; label: string }> = [
+  { value: "1/24", label: "1/24 octave" },
   { value: "1/12", label: "1/12 octave" },
   { value: "1/6", label: "1/6 octave" },
   { value: "1/3", label: "1/3 octave" },
