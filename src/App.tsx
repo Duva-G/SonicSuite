@@ -8,10 +8,11 @@ import FRPink from "./ui/FRPink";
 import FRPlayback from "./ui/FRPlayback";
 import FRDifference from "./ui/FRDifference";
 import IRProcessingPanel from "./ui/IRProcessingPanel";
+import PasswordGate from "./ui/PasswordGate";
 import "./App.css";
 import harbethLogo from "./assets/harbeth-logo.svg";
 
-export default function App() {
+function SonicSuiteApp() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const srcRef = useRef<AudioBufferSourceNode | null>(null);
   const convRef = useRef<ConvolverNode | null>(null);
@@ -868,4 +869,44 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
 
 
 
+
+
+
+export default function App() {
+  const passwordRequirement = (import.meta.env.VITE_APP_PAGE_PASSWORD ?? "").trim();
+  const [isAuthorized, setAuthorized] = useState(() => {
+    if (!passwordRequirement) return true;
+    if (typeof window === "undefined") return false;
+    try {
+      return window.sessionStorage.getItem("sonicSuiteAuthorized") === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    if (!passwordRequirement) return;
+    if (typeof window === "undefined") return;
+    try {
+      if (isAuthorized) {
+        window.sessionStorage.setItem("sonicSuiteAuthorized", "true");
+      } else {
+        window.sessionStorage.removeItem("sonicSuiteAuthorized");
+      }
+    } catch {
+      // Ignore storage access errors (e.g., private browsing mode restrictions)
+    }
+  }, [isAuthorized, passwordRequirement]);
+
+  if (passwordRequirement && !isAuthorized) {
+    return (
+      <PasswordGate
+        expectedPassword={passwordRequirement}
+        onUnlock={() => setAuthorized(true)}
+      />
+    );
+  }
+
+  return <SonicSuiteApp />;
+}
 
