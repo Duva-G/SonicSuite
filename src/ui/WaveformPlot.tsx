@@ -34,6 +34,10 @@ const IOS_FALLBACK_PALETTE: ChannelColor[] = [
     fill: "rgba(255, 159, 10, 0.24)",
   },
 ];
+const DEFAULT_AXIS_EXTENT = 1;
+const MIN_VISIBLE_Y_EXTENT = 1e-6;
+const Y_EXTENT_PADDING = 1.05;
+const Y_EXTENT_EPSILON = 1e-9;
 function createEmptyDownsample(channelCount = 0): DownsampleOutput {
   return {
     times: new Float32Array(0),
@@ -66,6 +70,15 @@ function buildDownsampleInput(buffer: AudioBuffer): DownsampleInput {
     channelData,
   };
 }
+function computeAutoYExtent(peak: number) {
+  const safePeak = Number.isFinite(peak) ? Math.abs(peak) : 0;
+  if (safePeak <= 0) {
+    return DEFAULT_AXIS_EXTENT;
+  }
+  const padded = safePeak * Y_EXTENT_PADDING;
+  return padded > MIN_VISIBLE_Y_EXTENT ? padded : MIN_VISIBLE_Y_EXTENT;
+}
+
 export default function WaveformPlot({ buffer, color, title }: Props) {
   const baseChannelCount = resolveChannelCount(buffer);
   const [downsampled, setDownsampled] = useState<DownsampleOutput>(() =>
@@ -74,8 +87,8 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
   const { times, channelSamples, duration, peak } = downsampled;
   const channelCount =
     channelSamples.length > 0 ? channelSamples.length : baseChannelCount;
-  const [xExtent, setXExtent] = useState(() => (duration > 0 ? duration : 1));
-  const [yExtent, setYExtent] = useState(() => (peak > 0 ? peak : 1));
+  const [xExtent, setXExtent] = useState(() => (duration > 0 ? duration : DEFAULT_AXIS_EXTENT));
+  const [yExtent, setYExtent] = useState(() => computeAutoYExtent(peak));
   const previousTitleRef = useRef(title);
   const workerRef = useRef<Worker | null>(null);
   const requestIdRef = useRef(0);
@@ -206,15 +219,16 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
     }
   }, [duration]);
   useEffect(() => {
-    if (peak > 0 && Number.isFinite(peak)) {
-      setYExtent((prev) => (peak > prev ? peak : prev));
-    }
+    setYExtent((prev) => {
+      const nextExtent = computeAutoYExtent(peak);
+      return Math.abs(prev - nextExtent) <= Y_EXTENT_EPSILON ? prev : nextExtent;
+    });
   }, [peak]);
   useEffect(() => {
     if (previousTitleRef.current !== title) {
       previousTitleRef.current = title;
-      setXExtent(duration > 0 && Number.isFinite(duration) ? duration : 1);
-      setYExtent(peak > 0 && Number.isFinite(peak) ? peak : 1);
+      setXExtent(duration > 0 && Number.isFinite(duration) ? duration : DEFAULT_AXIS_EXTENT);
+      setYExtent(computeAutoYExtent(peak));
     }
   }, [title, duration, peak]);
   const channelLabels = useMemo(() => {
@@ -261,8 +275,11 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
     [channelSamples, channelCount, channelColors, channelLabels, times, title],
   );
   const layout = useMemo(() => {
-    const safeXExtent = xExtent > 0 && Number.isFinite(xExtent) ? xExtent : 1;
-    const safeYExtent = yExtent > 0 && Number.isFinite(yExtent) ? yExtent : 1;
+    const safeXExtent = xExtent > 0 && Number.isFinite(xExtent) ? xExtent : DEFAULT_AXIS_EXTENT;
+    const safeYExtent =
+      yExtent > 0 && Number.isFinite(yExtent)
+        ? Math.max(yExtent, MIN_VISIBLE_Y_EXTENT)
+        : DEFAULT_AXIS_EXTENT;
     return {
       autosize: true,
       height: 220,
