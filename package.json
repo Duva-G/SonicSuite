@@ -11,6 +11,7 @@
     "prepare": "husky"
   },
   "dependencies": {
+    "@vercel/speed-insights": "^1.2.0",
     "fft.js": "^4.0.4",
     "plotly.js-dist-min": "^3.1.0",
     "react": "^19.1.1",
