@@ -53,6 +53,8 @@ const smoothingOptions: Array<{ value: SmoothingMode; label: string }> = [
   { value: "1/3", label: "1/3 octave" },
 ];
 
+const MAX_PLAYBACK_ANALYSIS_SECONDS = 30;
+
 export default function FRPlayback({ musicBuffer, irBuffer, sampleRate }: Props) {
   const [smoothing, setSmoothing] = useState<SmoothingMode>("1/6");
   const [spectra, setSpectra] = useState<WorkerResultPayload | null>(null);
@@ -170,7 +172,7 @@ export default function FRPlayback({ musicBuffer, irBuffer, sampleRate }: Props)
     setLoading(true);
     setError(null);
 
-    const musicPayload = serializeBuffer(musicBuffer, "music");
+    const musicPayload = serializeBuffer(musicBuffer, "music", MAX_PLAYBACK_ANALYSIS_SECONDS);
     const irPayload = irBuffer ? serializeBuffer(irBuffer, "ir") : null;
     const transferables: Transferable[] = [musicPayload.data.buffer];
     if (irPayload) transferables.push(irPayload.data.buffer);
@@ -345,14 +347,22 @@ export default function FRPlayback({ musicBuffer, irBuffer, sampleRate }: Props)
   );
 }
 
-function serializeBuffer(buffer: AudioBuffer, label: string) {
-  const length = buffer.length;
+function serializeBuffer(buffer: AudioBuffer, label: string, maxSeconds?: number) {
+  const totalLength = buffer.length;
   const channels = buffer.numberOfChannels;
+  const maxSamples = maxSeconds
+    ? Math.min(totalLength, Math.max(0, Math.floor(buffer.sampleRate * maxSeconds)))
+    : totalLength;
+  const length = Math.max(0, maxSamples);
+  if (length === 0) {
+    return { data: new Float32Array(0), sampleRate: buffer.sampleRate, label };
+  }
+  const start = length < totalLength ? Math.floor((totalLength - length) / 2) : 0;
   const mono = new Float32Array(length);
   for (let ch = 0; ch < channels; ch++) {
     const channel = buffer.getChannelData(ch);
     for (let i = 0; i < length; i++) {
-      mono[i] += channel[i];
+      mono[i] += channel[start + i];
     }
   }
   if (channels > 0) {
