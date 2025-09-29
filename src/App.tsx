@@ -198,11 +198,34 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
       teardownGraph();
     };
 
-    const latency = playbackMode === "convolved" ? convolverLatencyRef.current : 0;
-    const startAt = Math.max(0, at - latency);
-    src.start(0, startAt);
-    startTimeRef.current = ctx.currentTime;
-    setPlaying(true);
+    const startPlayback = () => {
+      const latency = playbackMode === "convolved" ? convolverLatencyRef.current : 0;
+      const startAt = Math.max(0, at - latency);
+      try {
+        src.start(0, startAt);
+        startTimeRef.current = ctx.currentTime;
+        setPlaying(true);
+      } catch (err) {
+        console.error("Audio source start failed", err);
+        const message = err instanceof Error ? err.message : String(err);
+        setStatus(`Playback failed: ${message}`);
+        teardownGraph();
+      }
+    };
+
+    if (ctx.state === "suspended") {
+      ctx
+        .resume()
+        .then(startPlayback)
+        .catch((err) => {
+          console.error("Audio context resume failed", err);
+          const message = err instanceof Error ? err.message : String(err);
+          setStatus(`Playback blocked by browser autoplay policy: ${message}`);
+          teardownGraph();
+        });
+    } else {
+      startPlayback();
+    }
   }
 
   function currentOffset(): number {
