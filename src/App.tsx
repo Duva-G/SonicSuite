@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import FileInputs from "./ui/FileInputs";
 import Transport from "./ui/Transport";
 import ModeBar from "./ui/ModeBar";
@@ -23,6 +23,7 @@ function SonicSuiteApp() {
   const musicBufRef = useRef<AudioBuffer | null>(null);
   const irOriginalRef = useRef<AudioBuffer | null>(null);
   const irBufRef = useRef<AudioBuffer | null>(null);
+  const residualBufRef = useRef<AudioBuffer | null>(null);
 
   const startTimeRef = useRef(0);
   const startOffsetRef = useRef(0);
@@ -32,8 +33,12 @@ function SonicSuiteApp() {
   const [mode, setMode] = useState<Mode>("original");
   const [originalVol, setOriginalVol] = useState<number>(1.0);
   const [convolvedVol, setConvolvedVol] = useState<number>(1.0);
+  const [differenceVol, setDifferenceVol] = useState<number>(1.0);
+  const [latencySamples, setLatencySamples] = useState<number>(0);
+  const [kPerCh, setKPerCh] = useState<number[] | null>(null);
   const [status, setStatus] = useState<string>("Load a music WAV and an IR WAV.");
   const [downloadUrl, setDownloadUrl] = useState<string>("");
+  const [differenceDownloadUrl, setDifferenceDownloadUrl] = useState<string>("");
   const [view, setView] = useState<"playback" | "playback-fr" | "frdiff" | "frpink">("playback");
   const [sessionSampleRate, setSessionSampleRate] = useState<number>(44100);
   const [musicBuffer, setMusicBuffer] = useState<AudioBuffer | null>(null);
@@ -45,8 +50,23 @@ function SonicSuiteApp() {
   const [musicName, setMusicName] = useState<string>("");
   const [irName, setIrName] = useState<string>("");
 
-  const transportDuration = musicBufRef.current?.duration ?? 0;
+  const getModeDuration = useCallback((playbackMode: Mode = mode): number => {
+    const musicDuration = musicBufRef.current?.duration ?? 0;
+    const residualDuration = residualBufRef.current?.duration ?? 0;
+    if (playbackMode === "difference") {
+      return Math.max(musicDuration, residualDuration);
+    }
+    return musicDuration;
+  }, [mode]);
+
+  const transportDuration = getModeDuration(mode);
   const clampedPlaybackPosition = Math.min(playbackPosition, transportDuration || 0);
+  const residualSampleRate = residualBufRef.current?.sampleRate ?? sessionSampleRate;
+  const latencyMs = residualSampleRate > 0 ? (latencySamples / residualSampleRate) * 1000 : 0;
+  const formattedKPerCh = kPerCh?.map((value) => value.toFixed(4)) ?? null;
+  const kPerChDisplay = formattedKPerCh
+    ? formattedKPerCh.map((value, idx) => `ch${idx + 1}=${value}`).join(", ")
+    : "";
 
 
   function ensureCtx(): AudioContext {
@@ -152,41 +172,59 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
 
   function makeGraph(at: number, playbackMode: Mode = mode) {
     const ctx = ensureCtx();
+    const isDifference = playbackMode === "difference";
+    const isConvolved = playbackMode === "convolved";
+
     const music = musicBufRef.current;
-    if (!music) {
-      setStatus("No music loaded.");
-      return;
+    const residual = residualBufRef.current;
+
+    let buffer: AudioBuffer | null = null;
+    if (isDifference) {
+      buffer = residual;
+      if (!buffer) {
+        setStatus("Difference signal not ready. Load music and IR first.");
+        return;
+      }
+    } else {
+      buffer = music;
+      if (!buffer) {
+        setStatus("No music loaded.");
+        return;
+      }
     }
 
-    const src = new AudioBufferSourceNode(ctx, { buffer: music });
-    const matchValue = Math.max(convolvedMatchGain, 1e-6);
-    const initialGain = playbackMode === "convolved" ? convolvedVol : originalVol;
+    const src = new AudioBufferSourceNode(ctx, { buffer });
+    const initialGain = isDifference ? differenceVol : isConvolved ? convolvedVol : originalVol;
     const volume = new GainNode(ctx, { gain: initialGain });
     srcRef.current = src;
     gainRef.current = volume;
-    startOffsetRef.current = at;
-    setPlaybackPosition(Math.min(at, music.duration));
 
-    if (playbackMode === "convolved") {
+    const clampedStart = Math.min(at, buffer.duration);
+    startOffsetRef.current = clampedStart;
+    setPlaybackPosition(clampedStart);
+
+    matchGainRef.current = null;
+    convRef.current = null;
+
+    if (isConvolved) {
       const ir = irBufRef.current;
       if (!ir) {
         setStatus("No IR loaded.");
-        matchGainRef.current = null;
-        convRef.current = null;
         convolverLatencyRef.current = 0;
         return;
       }
-      const latencySamples = computeAnalysisOffset(ir, ir.length);
-      convolverLatencyRef.current = latencySamples / ctx.sampleRate;
+      const latencySamplesValue = computeAnalysisOffset(ir, ir.length);
+      convolverLatencyRef.current = latencySamplesValue / ctx.sampleRate;
       const conv = new ConvolverNode(ctx, { buffer: ir, disableNormalization: false });
+      const matchValue = Math.max(convolvedMatchGain, 1e-6);
       const matchGain = new GainNode(ctx, { gain: matchValue });
       convRef.current = conv;
       matchGainRef.current = matchGain;
       src.connect(conv).connect(matchGain).connect(volume).connect(ctx.destination);
     } else {
-      convolverLatencyRef.current = 0;
-      matchGainRef.current = null;
-      convRef.current = null;
+      const residualRate = buffer.sampleRate || sessionSampleRate;
+      convolverLatencyRef.current =
+        isDifference && residualRate > 0 ? latencySamples / residualRate : 0;
       src.connect(volume).connect(ctx.destination);
     }
 
@@ -199,8 +237,9 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     };
 
     const startPlayback = () => {
-      const latency = playbackMode === "convolved" ? convolverLatencyRef.current : 0;
-      const startAt = Math.max(0, at - latency);
+      const latency =
+        isConvolved || isDifference ? Math.max(0, convolverLatencyRef.current) : 0;
+      const startAt = Math.max(0, clampedStart - latency);
       try {
         src.start(0, startAt);
         startTimeRef.current = ctx.currentTime;
@@ -237,9 +276,14 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
   useEffect(() => {
     let raf = 0;
 
+    const resolveDuration = () => {
+      const musicDuration = musicBufRef.current?.duration ?? 0;
+      const residualDuration = residualBufRef.current?.duration ?? 0;
+      return mode === "difference" ? Math.max(musicDuration, residualDuration) : musicDuration;
+    };
+
     const update = () => {
-      const music = musicBufRef.current;
-      const duration = music?.duration ?? 0;
+      const duration = resolveDuration();
       const next = Math.min(currentOffset(), duration);
       setPlaybackPosition(next);
       raf = requestAnimationFrame(update);
@@ -248,8 +292,7 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     if (isPlaying) {
       raf = requestAnimationFrame(update);
     } else {
-      const music = musicBufRef.current;
-      const duration = music?.duration ?? 0;
+      const duration = resolveDuration();
       const clamped = Math.min(startOffsetRef.current, duration);
       setPlaybackPosition(clamped);
     }
@@ -257,15 +300,15 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     return () => {
       if (raf) cancelAnimationFrame(raf);
     };
-  }, [isPlaying]);
+  }, [isPlaying, mode]);
 
   function playPause() {
     if (!isPlaying) {
       makeGraph(startOffsetRef.current, mode);
     } else {
-      const music = musicBufRef.current;
-      const duration = music?.duration ?? Infinity;
-      const off = Math.min(currentOffset(), duration);
+      const duration = getModeDuration(mode);
+      const limit = duration > 0 ? duration : Infinity;
+      const off = Math.min(currentOffset(), limit);
       teardownGraph();
       startOffsetRef.current = off;
       setPlaybackPosition(off);
@@ -281,9 +324,8 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
   }
 
   function seekTo(seconds: number, resume?: boolean) {
-    const music = musicBufRef.current;
-    if (!music) return;
-    const duration = music.duration;
+    const duration = getModeDuration(mode);
+    if (duration <= 0) return;
     const target = Math.max(0, Math.min(seconds, duration));
     const wasPlaying = isPlaying;
     const shouldResume = resume ?? wasPlaying;
@@ -301,24 +343,68 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
   }
 
   function skipBy(delta: number) {
-    const music = musicBufRef.current;
-    if (!music) return;
+    const duration = getModeDuration(mode);
+    if (duration <= 0) return;
     const base = isPlaying ? currentOffset() : startOffsetRef.current;
     seekTo(base + delta, isPlaying);
   }
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const computeResidual = async () => {
+      const music = musicBufRef.current;
+      const ir = irBufRef.current;
+      if (!music || !ir) {
+        residualBufRef.current = null;
+        if (!cancelled) {
+          setKPerCh(null);
+          setLatencySamples(0);
+        }
+        return;
+      }
+
+      try {
+        const result = await buildResidualBuffer(music, ir);
+        if (cancelled) return;
+        if (!result) {
+          residualBufRef.current = null;
+          setKPerCh(null);
+          setLatencySamples(0);
+          return;
+        }
+        residualBufRef.current = result.buffer;
+        setLatencySamples(result.offset);
+        setKPerCh(result.gains);
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Residual computation failed", err);
+        residualBufRef.current = null;
+        setKPerCh(null);
+        setLatencySamples(0);
+      }
+    };
+
+    computeResidual();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [musicBuffer, irBuffer]);
+
   function onChangeMode(next: Mode) {
     if (next === mode) return;
     const wasPlaying = isPlaying;
-    const off = wasPlaying ? currentOffset() : startOffsetRef.current;
-    const music = musicBufRef.current;
-    const duration = music?.duration ?? Infinity;
-    const clamped = Math.min(off, duration);
+    const currentDuration = getModeDuration(mode);
+    const currentPosition = wasPlaying ? currentOffset() : startOffsetRef.current;
+    const clampedCurrent = Math.min(currentPosition, currentDuration > 0 ? currentDuration : currentPosition);
+    const nextDuration = getModeDuration(next);
+    const clamped = Math.min(clampedCurrent, nextDuration > 0 ? nextDuration : clampedCurrent);
     teardownGraph();
     setMode(next);
     startOffsetRef.current = clamped;
     setPlaybackPosition(clamped);
-    if (wasPlaying) makeGraph(clamped, next);
+    if (wasPlaying && clamped < nextDuration) makeGraph(clamped, next);
   }
 
   function onChangeOriginalVol(v: number) {
@@ -335,9 +421,17 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     }
   }
 
+  function onChangeDifferenceVol(v: number) {
+    setDifferenceVol(v);
+    if (gainRef.current && mode === "difference") {
+      gainRef.current.gain.value = v;
+    }
+  }
+
   function resetVolumes() {
     onChangeOriginalVol(1);
     onChangeConvolvedVol(1);
+    onChangeDifferenceVol(1);
   }
 
   function handleIrManualTrim(startMs: number, endMs: number) {
@@ -565,167 +659,38 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
     setStatus("Rendered. Click Download.");
   }
 
-  function rmsBuffer(buf: AudioBuffer, frameCount?: number, offset = 0): number {
-    const start = Math.max(0, Math.min(offset, buf.length));
-    const available = buf.length - start;
-    const frames = Math.min(frameCount ?? available, available);
-    if (frames <= 0) return 0;
-    const channels = buf.numberOfChannels;
-    if (channels === 0) return 0;
-    let acc = 0;
-    for (let ch = 0; ch < channels; ch++) {
-      const data = buf.getChannelData(ch);
-      for (let i = 0; i < frames; i++) {
-        const x = data[start + i];
-        acc += x * x;
-      }
+  async function renderAndExportDifference() {
+    if (!musicBufRef.current || !irBufRef.current) {
+      setStatus("Load music and IR first.");
+      return;
     }
-    const count = frames * channels;
-    return count ? Math.sqrt(acc / count) : 0;
-  }
 
-  function impulseOffset(buf: AudioBuffer): number {
-    const threshold = 0.0005;
-    let minIndex = buf.length;
-    for (let ch = 0; ch < buf.numberOfChannels; ch++) {
-      const data = buf.getChannelData(ch);
-      for (let i = 0; i < buf.length; i++) {
-        if (Math.abs(data[i]) > threshold) {
-          if (i < minIndex) minIndex = i;
-          break;
+    try {
+      const result = await buildResidualBuffer(musicBufRef.current, irBufRef.current);
+      if (!result) {
+        setStatus("Difference render failed: missing buffers.");
+        return;
+      }
+      residualBufRef.current = result.buffer;
+      setLatencySamples(result.offset);
+      setKPerCh(result.gains);
+
+      const wav = audioBufferToWav(result.buffer, 16);
+      const blob = new Blob([wav], { type: "audio/wav" });
+      if (differenceDownloadUrl) {
+        try {
+          URL.revokeObjectURL(differenceDownloadUrl);
+        } catch {
+          // ignore revoke errors
         }
       }
+      const url = URL.createObjectURL(blob);
+      setDifferenceDownloadUrl(url);
+      setStatus("Difference rendered. Click Download.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setStatus(`Difference render failed: ${message}`);
     }
-    if (!Number.isFinite(minIndex) || minIndex >= buf.length) return 0;
-    return minIndex;
-  }
-
-  function computeAnalysisOffset(irBuffer: AudioBuffer, maxFrames: number): number {
-    const raw = impulseOffset(irBuffer);
-    return Math.min(raw, Math.max(0, maxFrames - 1));
-  }
-
-  function alignedRmsPair(dry: AudioBuffer, wet: AudioBuffer, offset: number): [number, number] {
-    if (dry.length === 0 || wet.length === 0) return [0, 0];
-    const wetAvailable = Math.max(0, wet.length - offset);
-    let frames = Math.min(dry.length, wetAvailable);
-    if (frames <= 0) frames = Math.min(dry.length, wet.length);
-    if (frames <= 0) return [0, 0];
-    const wetOffset = Math.max(0, Math.min(offset, wet.length - frames));
-    const dryOffset = 0;
-    const dryRms = rmsBuffer(dry, frames, dryOffset);
-    const wetRms = rmsBuffer(wet, frames, wetOffset);
-    return [dryRms, wetRms];
-  }
-
-
-  function scaleInPlace(buf: AudioBuffer, g: number) {
-    for (let ch = 0; ch < buf.numberOfChannels; ch++) {
-      const d = buf.getChannelData(ch);
-      for (let i = 0; i < d.length; i++) {
-        let v = d[i] * g;
-        if (v > 1) v = 1;
-        if (v < -1) v = -1;
-        d[i] = v;
-      }
-    }
-  }
-
-  function resampleAudioBuffer(buffer: AudioBuffer, targetRate: number): AudioBuffer {
-    if (buffer.sampleRate === targetRate) return buffer;
-    const duration = buffer.length / buffer.sampleRate;
-    const newLength = Math.max(1, Math.round(duration * targetRate));
-    const resampled = new AudioBuffer({
-      length: newLength,
-      numberOfChannels: buffer.numberOfChannels,
-      sampleRate: targetRate,
-    });
-    const ratio = buffer.sampleRate / targetRate;
-    for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-      const src = buffer.getChannelData(ch);
-      const dest = resampled.getChannelData(ch);
-      for (let i = 0; i < newLength; i++) {
-        const srcPos = i * ratio;
-        const idx = Math.floor(srcPos);
-        const frac = srcPos - idx;
-        const s0 = src[Math.min(idx, src.length - 1)];
-        const s1 = src[Math.min(idx + 1, src.length - 1)];
-        dest[i] = s0 + (s1 - s0) * frac;
-      }
-    }
-    return resampled;
-  }
-
-  function audioBufferToWav(buf: AudioBuffer, bitDepth: 16 | 24 | 32 = 16): ArrayBuffer {
-    const numCh = buf.numberOfChannels;
-    const len = buf.length;
-    const sr = buf.sampleRate;
-
-    const interleaved = new Float32Array(len * numCh);
-    for (let i = 0; i < len; i++) {
-      for (let ch = 0; ch < numCh; ch++) {
-        interleaved[i * numCh + ch] = buf.getChannelData(ch)[i];
-      }
-    }
-
-    let bytesPerSample: number;
-    let pcm: DataView;
-    if (bitDepth === 16) {
-      bytesPerSample = 2;
-      const out = new ArrayBuffer(interleaved.length * 2);
-      pcm = new DataView(out);
-      for (let i = 0; i < interleaved.length; i++) {
-        const s = Math.max(-1, Math.min(1, interleaved[i]));
-        pcm.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-      }
-    } else if (bitDepth === 24) {
-      bytesPerSample = 3;
-      const out = new ArrayBuffer(interleaved.length * 3);
-      pcm = new DataView(out);
-      for (let i = 0; i < interleaved.length; i++) {
-        const s = Math.max(-1, Math.min(1, interleaved[i]));
-        const v = Math.floor(s < 0 ? s * 0x800000 : s * 0x7fffff);
-        pcm.setUint8(i * 3 + 0, v & 0xff);
-        pcm.setUint8(i * 3 + 1, (v >> 8) & 0xff);
-        pcm.setUint8(i * 3 + 2, (v >> 16) & 0xff);
-      }
-    } else {
-      bytesPerSample = 4;
-      const out = new ArrayBuffer(interleaved.length * 4);
-      pcm = new DataView(out);
-      for (let i = 0; i < interleaved.length; i++) {
-        pcm.setFloat32(i * 4, interleaved[i], true);
-      }
-    }
-
-    const blockAlign = numCh * bytesPerSample;
-    const byteRate = sr * blockAlign;
-    const dataSize = pcm.buffer.byteLength;
-    const wav = new ArrayBuffer(44 + dataSize);
-    const view = new DataView(wav);
-
-    writeStr(view, 0, "RIFF");
-    view.setUint32(4, 36 + dataSize, true);
-    writeStr(view, 8, "WAVE");
-
-    writeStr(view, 12, "fmt ");
-    view.setUint32(16, 16, true);
-    const format = bitDepth === 32 ? 3 : 1;
-    view.setUint16(20, format, true);
-    view.setUint16(22, numCh, true);
-    view.setUint32(24, sr, true);
-    view.setUint32(28, byteRate, true);
-    view.setUint16(32, blockAlign, true);
-    view.setUint16(34, bitDepth, true);
-
-    writeStr(view, 36, "data");
-    view.setUint32(40, dataSize, true);
-    new Uint8Array(wav, 44).set(new Uint8Array(pcm.buffer));
-    return wav;
-  }
-
-  function writeStr(view: DataView, offset: number, s: string) {
-    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
   }
 
   const canMatchRms = Boolean(musicBufRef.current && irBuffer);
@@ -769,6 +734,12 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
             </div>
           </div>
           <pre>{status}</pre>
+          {formattedKPerCh && (
+            <div className="status-metrics">
+              <div>Difference latency: {latencySamples} samples ({latencyMs.toFixed(2)} ms)</div>
+              <div>k per ch: {kPerChDisplay}</div>
+            </div>
+          )}
         </section>
 
         <section className="panel view-panel">
@@ -839,6 +810,8 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
                 onChangeOriginalVol={onChangeOriginalVol}
                 convolvedVol={convolvedVol}
                 onChangeConvolvedVol={onChangeConvolvedVol}
+                differenceVol={differenceVol}
+                onChangeDifferenceVol={onChangeDifferenceVol}
                 onResetVolumes={resetVolumes}
                 duration={transportDuration}
                 position={clampedPlaybackPosition}
@@ -848,7 +821,12 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
               />
             </section>
 
-            <ExportBar renderAndExport={renderAndExport} downloadUrl={downloadUrl} />
+            <ExportBar
+              renderAndExport={renderAndExport}
+              downloadUrl={downloadUrl}
+              renderDifference={renderAndExportDifference}
+              differenceUrl={differenceDownloadUrl}
+            />
           </>
         ) : view === "playback-fr" ? (
           <section className="panel frpink-panel">
@@ -933,3 +911,264 @@ export default function App() {
   return <SonicSuiteApp />;
 }
 
+
+async function buildResidualBuffer(
+  music: AudioBuffer | null,
+  ir: AudioBuffer | null
+): Promise<{
+  buffer: AudioBuffer;
+  offset: number;
+  gains: number[];
+} | null> {
+  if (!music || !ir) return null;
+
+  const targetRate = music.sampleRate;
+  const dry = music;
+  const irForOffline =
+    ir.sampleRate === targetRate ? ir : resampleAudioBuffer(ir, targetRate);
+  const offlineLength = Math.max(1, dry.length + irForOffline.length - 1);
+  const offline = new OfflineAudioContext(dry.numberOfChannels, offlineLength, targetRate);
+  const src = new AudioBufferSourceNode(offline, { buffer: dry });
+  const conv = new ConvolverNode(offline, { buffer: irForOffline, disableNormalization: false });
+  src.connect(conv).connect(offline.destination);
+  src.start();
+  const rendered = await offline.startRendering();
+  const offset = computeAnalysisOffset(irForOffline, rendered.length);
+  const { residual, gains } = makeResidualBuffer(rendered, dry, offset);
+  limitPeakInPlace(residual, -0.3);
+  return { buffer: residual, offset, gains };
+}
+
+function makeResidualBuffer(
+  convolved: AudioBuffer,
+  original: AudioBuffer,
+  offsetSamples: number
+): { residual: AudioBuffer; gains: number[] } {
+  const channelCount = convolved.numberOfChannels;
+  const length = convolved.length;
+  const sampleRate = convolved.sampleRate;
+  const residual = new AudioBuffer({ numberOfChannels: channelCount, length, sampleRate });
+  const gains: number[] = [];
+  const delay = Math.max(0, Math.floor(offsetSamples));
+
+  for (let ch = 0; ch < channelCount; ch++) {
+    const y = convolved.getChannelData(ch);
+    const originalChannelCount = original.numberOfChannels;
+    const sourceChannel =
+      originalChannelCount > 0 ? Math.min(ch, originalChannelCount - 1) : 0;
+    const x = originalChannelCount > 0 ? original.getChannelData(sourceChannel) : null;
+    const dst = residual.getChannelData(ch);
+    if (!x) {
+      gains.push(1);
+      dst.set(y);
+      continue;
+    }
+
+    const overlapStart = Math.min(Math.max(0, delay), length);
+    const overlapEnd = Math.min(length, x.length + delay);
+
+    let num = 0;
+    let den = 0;
+    for (let i = overlapStart; i < overlapEnd; i++) {
+      const sourceIndex = i - delay;
+      if (sourceIndex < 0 || sourceIndex >= x.length) continue;
+      const xv = x[sourceIndex];
+      const yv = y[i];
+      num += xv * yv;
+      den += xv * xv;
+    }
+    const gain = den > 1e-12 ? num / den : 1;
+    gains.push(gain);
+
+    for (let i = 0; i < length; i++) {
+      const sourceIndex = i - delay;
+      const xv = sourceIndex >= 0 && sourceIndex < x.length ? x[sourceIndex] : 0;
+      dst[i] = y[i] - gain * xv;
+    }
+  }
+
+  return { residual, gains };
+}
+
+function limitPeakInPlace(buf: AudioBuffer, ceilingDb = -0.3) {
+  if (buf.sampleRate <= 0) return;
+  const ceiling = Math.pow(10, ceilingDb / 20);
+  const attack = Math.exp(-1 / (buf.sampleRate * 0.001));
+  const release = Math.exp(-1 / (buf.sampleRate * 0.05));
+  for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+    const data = buf.getChannelData(ch);
+    let env = 0;
+    for (let i = 0; i < data.length; i++) {
+      const absVal = Math.abs(data[i]);
+      if (absVal > env) {
+        env = attack * env + (1 - attack) * absVal;
+      } else {
+        env = release * env + (1 - release) * absVal;
+      }
+      const gain = env > ceiling ? ceiling / (env + 1e-12) : 1;
+      data[i] *= gain;
+    }
+  }
+}
+
+function impulseOffset(buf: AudioBuffer): number {
+  const threshold = 0.0005;
+  let minIndex = buf.length;
+  for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+    const data = buf.getChannelData(ch);
+    for (let i = 0; i < buf.length; i++) {
+      if (Math.abs(data[i]) > threshold) {
+        if (i < minIndex) minIndex = i;
+        break;
+      }
+    }
+  }
+  if (!Number.isFinite(minIndex) || minIndex >= buf.length) return 0;
+  return minIndex;
+}
+
+function computeAnalysisOffset(irBuffer: AudioBuffer, maxFrames: number): number {
+  const raw = impulseOffset(irBuffer);
+  return Math.min(raw, Math.max(0, maxFrames - 1));
+}
+
+function resampleAudioBuffer(buffer: AudioBuffer, targetRate: number): AudioBuffer {
+  if (buffer.sampleRate === targetRate) return buffer;
+  const duration = buffer.length / buffer.sampleRate;
+  const newLength = Math.max(1, Math.round(duration * targetRate));
+  const resampled = new AudioBuffer({
+    length: newLength,
+    numberOfChannels: buffer.numberOfChannels,
+    sampleRate: targetRate,
+  });
+  const ratio = buffer.sampleRate / targetRate;
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const src = buffer.getChannelData(ch);
+    const dest = resampled.getChannelData(ch);
+    for (let i = 0; i < newLength; i++) {
+      const srcPos = i * ratio;
+      const idx = Math.floor(srcPos);
+      const frac = srcPos - idx;
+      const s0 = src[Math.min(idx, src.length - 1)];
+      const s1 = src[Math.min(idx + 1, src.length - 1)];
+      dest[i] = s0 + (s1 - s0) * frac;
+    }
+  }
+  return resampled;
+}
+
+function rmsBuffer(buf: AudioBuffer, frameCount?: number, offset = 0): number {
+  const start = Math.max(0, Math.min(offset, buf.length));
+  const available = buf.length - start;
+  const frames = Math.min(frameCount ?? available, available);
+  if (frames <= 0) return 0;
+  const channels = buf.numberOfChannels;
+  if (channels === 0) return 0;
+  let acc = 0;
+  for (let ch = 0; ch < channels; ch++) {
+    const data = buf.getChannelData(ch);
+    for (let i = 0; i < frames; i++) {
+      const x = data[start + i];
+      acc += x * x;
+    }
+  }
+  const count = frames * channels;
+  return count ? Math.sqrt(acc / count) : 0;
+}
+
+function alignedRmsPair(dry: AudioBuffer, wet: AudioBuffer, offset: number): [number, number] {
+  if (dry.length === 0 || wet.length === 0) return [0, 0];
+  const wetAvailable = Math.max(0, wet.length - offset);
+  let frames = Math.min(dry.length, wetAvailable);
+  if (frames <= 0) frames = Math.min(dry.length, wet.length);
+  if (frames <= 0) return [0, 0];
+  const wetOffset = Math.max(0, Math.min(offset, wet.length - frames));
+  const dryOffset = 0;
+  const dryRms = rmsBuffer(dry, frames, dryOffset);
+  const wetRms = rmsBuffer(wet, frames, wetOffset);
+  return [dryRms, wetRms];
+}
+
+function scaleInPlace(buf: AudioBuffer, g: number) {
+  for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+    const d = buf.getChannelData(ch);
+    for (let i = 0; i < d.length; i++) {
+      let v = d[i] * g;
+      if (v > 1) v = 1;
+      if (v < -1) v = -1;
+      d[i] = v;
+    }
+  }
+}
+
+function audioBufferToWav(buf: AudioBuffer, bitDepth: 16 | 24 | 32 = 16): ArrayBuffer {
+  const numCh = buf.numberOfChannels;
+  const len = buf.length;
+  const sr = buf.sampleRate;
+
+  const interleaved = new Float32Array(len * numCh);
+  for (let i = 0; i < len; i++) {
+    for (let ch = 0; ch < numCh; ch++) {
+      interleaved[i * numCh + ch] = buf.getChannelData(ch)[i];
+    }
+  }
+
+  let bytesPerSample: number;
+  let pcm: DataView;
+  if (bitDepth === 16) {
+    bytesPerSample = 2;
+    const out = new ArrayBuffer(interleaved.length * 2);
+    pcm = new DataView(out);
+    for (let i = 0; i < interleaved.length; i++) {
+      const s = Math.max(-1, Math.min(1, interleaved[i]));
+      pcm.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+  } else if (bitDepth === 24) {
+    bytesPerSample = 3;
+    const out = new ArrayBuffer(interleaved.length * 3);
+    pcm = new DataView(out);
+    for (let i = 0; i < interleaved.length; i++) {
+      const s = Math.max(-1, Math.min(1, interleaved[i]));
+      const v = Math.floor(s < 0 ? s * 0x800000 : s * 0x7fffff);
+      pcm.setUint8(i * 3 + 0, v & 0xff);
+      pcm.setUint8(i * 3 + 1, (v >> 8) & 0xff);
+      pcm.setUint8(i * 3 + 2, (v >> 16) & 0xff);
+    }
+  } else {
+    bytesPerSample = 4;
+    const out = new ArrayBuffer(interleaved.length * 4);
+    pcm = new DataView(out);
+    for (let i = 0; i < interleaved.length; i++) {
+      pcm.setFloat32(i * 4, interleaved[i], true);
+    }
+  }
+
+  const blockAlign = numCh * bytesPerSample;
+  const byteRate = sr * blockAlign;
+  const dataSize = pcm.buffer.byteLength;
+  const wav = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(wav);
+
+  writeStr(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(view, 8, "WAVE");
+
+  writeStr(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  const format = bitDepth === 32 ? 3 : 1;
+  view.setUint16(20, format, true);
+  view.setUint16(22, numCh, true);
+  view.setUint32(24, sr, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitDepth, true);
+
+  writeStr(view, 36, "data");
+  view.setUint32(40, dataSize, true);
+  new Uint8Array(wav, 44).set(new Uint8Array(pcm.buffer));
+  return wav;
+}
+
+function writeStr(view: DataView, offset: number, s: string) {
+  for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+}
