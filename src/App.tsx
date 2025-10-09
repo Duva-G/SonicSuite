@@ -9,8 +9,37 @@ import FRPlayback from "./ui/FRPlayback";
 import FRDifference from "./ui/FRDifference";
 import IRProcessingPanel from "./ui/IRProcessingPanel";
 import PasswordGate from "./ui/PasswordGate";
+import { createModuleWorker } from "./utils/workerSupport";
 import "./App.css";
 import harbethLogo from "./assets/harbeth-logo.svg";
+
+type ResidualBasis = {
+  music: AudioBuffer;
+  ir: AudioBuffer;
+  convolved: AudioBuffer;
+  offset: number;
+  gains: number[];
+  fallbackResidual: AudioBuffer;
+};
+
+type ResidualWorkerSuccess = {
+  type: "residual-ready";
+  requestId: number;
+  payload: {
+    channelData: Float32Array;
+    sampleRate: number;
+  };
+};
+
+type ResidualWorkerFailure = {
+  type: "residual-error";
+  requestId: number;
+  error: string;
+};
+
+type ResidualWorkerMessage = ResidualWorkerSuccess | ResidualWorkerFailure;
+
+const DEFAULT_SOLO_BAND: [number, number] = [20, 20000];
 
 function SonicSuiteApp() {
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -24,6 +53,13 @@ function SonicSuiteApp() {
   const irOriginalRef = useRef<AudioBuffer | null>(null);
   const irBufRef = useRef<AudioBuffer | null>(null);
   const residualBufRef = useRef<AudioBuffer | null>(null);
+  const residualBasisRef = useRef<ResidualBasis | null>(null);
+  const residualWorkerRef = useRef<Worker | null>(null);
+  const residualRequestIdRef = useRef(0);
+  const residualPendingRef = useRef(
+    new Map<number, { resolve: (buffer: AudioBuffer) => void; reject: (error: Error) => void }>(),
+  );
+  const makeGraphRef = useRef<((at: number, playbackMode?: Mode) => void) | null>(null);
 
   const startTimeRef = useRef(0);
   const startOffsetRef = useRef(0);
@@ -34,8 +70,18 @@ function SonicSuiteApp() {
   const [originalVol, setOriginalVol] = useState<number>(1.0);
   const [convolvedVol, setConvolvedVol] = useState<number>(1.0);
   const [differenceVol, setDifferenceVol] = useState<number>(1.0);
+  const [differenceThresholdDb, setDifferenceThresholdDb] = useState<number>(0);
+  const [pendingDifferenceThresholdDb, setPendingDifferenceThresholdDb] = useState<number>(0);
+  const [differenceAbsMode, setDifferenceAbsMode] = useState<boolean>(true);
+  const [soloBandEnabled, setSoloBandEnabled] = useState<boolean>(false);
+  const [pendingSoloBandEnabled, setPendingSoloBandEnabled] = useState<boolean>(false);
+  const [soloBandHz, setSoloBandHz] = useState<[number, number]>(() => [...DEFAULT_SOLO_BAND]);
+  const [pendingSoloBandHz, setPendingSoloBandHz] = useState<[number, number]>(() => [...DEFAULT_SOLO_BAND]);
+  const [soloBandMinHz, soloBandMaxHz] = soloBandHz;
+  const [isResidualComputing, setResidualComputing] = useState<boolean>(false);
   const [latencySamples, setLatencySamples] = useState<number>(0);
   const [kPerCh, setKPerCh] = useState<number[] | null>(null);
+  const [isStatusInfoOpen, setStatusInfoOpen] = useState(false);
   const [status, setStatus] = useState<string>("Load a music WAV and an IR WAV.");
   const [downloadUrl, setDownloadUrl] = useState<string>("");
   const [differenceDownloadUrl, setDifferenceDownloadUrl] = useState<string>("");
@@ -67,6 +113,17 @@ function SonicSuiteApp() {
   const kPerChDisplay = formattedKPerCh
     ? formattedKPerCh.map((value, idx) => `ch${idx + 1}=${value}`).join(", ")
     : "";
+  const thresholdDirty = Math.abs(pendingDifferenceThresholdDb - differenceThresholdDb) > 1e-6;
+  const bandEnabledDirty = pendingSoloBandEnabled !== soloBandEnabled;
+  const bandRangeDirty =
+    Math.abs(pendingSoloBandHz[0] - soloBandHz[0]) > 1e-6 || Math.abs(pendingSoloBandHz[1] - soloBandHz[1]) > 1e-6;
+  const differenceControlsDirty = thresholdDirty || bandEnabledDirty || bandRangeDirty;
+
+  useEffect(() => {
+    if (!formattedKPerCh) {
+      setStatusInfoOpen(false);
+    }
+  }, [formattedKPerCh]);
 
 
   function ensureCtx(): AudioContext {
@@ -89,6 +146,8 @@ function SonicSuiteApp() {
     try {
       const buf = await decodeFile(f);
       musicBufRef.current = buf;
+      residualBasisRef.current = null;
+      residualBufRef.current = null;
       setMusicBuffer(buf);
       setMusicName(f.name);
       setSessionSampleRate(buf.sampleRate);
@@ -103,6 +162,8 @@ function SonicSuiteApp() {
       setConvolvedGainMatched(false);
       startOffsetRef.current = 0;
       setPlaybackPosition(0);
+      residualBasisRef.current = null;
+      residualBufRef.current = null;
       setStatus(`Music load failed: ${(err as Error).message}`);
     }
   }
@@ -119,6 +180,8 @@ function SonicSuiteApp() {
       setIrName(f.name);
       setConvolvedMatchGain(1);
       setConvolvedGainMatched(false);
+      residualBasisRef.current = null;
+      residualBufRef.current = null;
       if (matchGainRef.current) {
         matchGainRef.current.gain.value = 1;
       }
@@ -140,6 +203,8 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
       setIrName("");
       setConvolvedMatchGain(1);
       setConvolvedGainMatched(false);
+      residualBasisRef.current = null;
+      residualBufRef.current = null;
       if (matchGainRef.current) {
         matchGainRef.current.gain.value = 1;
       }
@@ -267,6 +332,8 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     }
   }
 
+  makeGraphRef.current = makeGraph;
+
   function currentOffset(): number {
     const ctx = audioCtxRef.current;
     if (!ctx) return 0;
@@ -349,6 +416,91 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     seekTo(base + delta, isPlaying);
   }
 
+  function applyDifferenceThreshold() {
+    if (!differenceControlsDirty || isResidualComputing) return;
+    setDifferenceThresholdDb(pendingDifferenceThresholdDb);
+    if (bandEnabledDirty) {
+      setSoloBandEnabled(pendingSoloBandEnabled);
+    }
+    if (bandRangeDirty) {
+      setSoloBandHz([pendingSoloBandHz[0], pendingSoloBandHz[1]]);
+    }
+  }
+
+  function resetDifferenceThreshold() {
+    if (!differenceControlsDirty) return;
+    if (thresholdDirty) {
+      setPendingDifferenceThresholdDb(differenceThresholdDb);
+    }
+    if (bandEnabledDirty) {
+      setPendingSoloBandEnabled(soloBandEnabled);
+    }
+    if (bandRangeDirty) {
+      setPendingSoloBandHz([soloBandHz[0], soloBandHz[1]]);
+    }
+  }
+
+  const computeResidualWithWorker = useCallback(
+    (
+      basis: ResidualBasis,
+      thresholdDb: number,
+      bandOptions: { soloEnabled: boolean; minHz: number; maxHz: number } = {
+        soloEnabled: false,
+        minHz: DEFAULT_SOLO_BAND[0],
+        maxHz: DEFAULT_SOLO_BAND[1],
+      },
+    ): Promise<AudioBuffer> => {
+      const worker = residualWorkerRef.current;
+      if (!worker) {
+        return Promise.reject(new Error("Residual worker unavailable"));
+      }
+      const requestId = ++residualRequestIdRef.current;
+      return new Promise<AudioBuffer>((resolve, reject) => {
+        residualPendingRef.current.set(requestId, { resolve, reject });
+
+        const wetChannels: Float32Array[] = [];
+        const wetCount = basis.convolved.numberOfChannels > 0 ? basis.convolved.numberOfChannels : 1;
+        for (let ch = 0; ch < wetCount; ch++) {
+          wetChannels.push(basis.convolved.getChannelData(Math.min(ch, basis.convolved.numberOfChannels - 1)).slice());
+        }
+
+        const dryChannels: Float32Array[] = [];
+        const dryCount = basis.music.numberOfChannels > 0 ? basis.music.numberOfChannels : 1;
+        for (let ch = 0; ch < dryCount; ch++) {
+          dryChannels.push(basis.music.getChannelData(Math.min(ch, basis.music.numberOfChannels - 1)).slice());
+        }
+
+        const gainArrayLength = Math.max(1, basis.gains.length, wetChannels.length, dryChannels.length);
+        const gains = new Float32Array(gainArrayLength);
+        for (let i = 0; i < gainArrayLength; i++) {
+          const value = basis.gains[i];
+          gains[i] = Number.isFinite(value) ? value : 1;
+        }
+
+        const payload = {
+          wetChannels,
+          dryChannels,
+          gains,
+          offset: basis.offset,
+          thresholdDb,
+          sampleRate: basis.convolved.sampleRate,
+          originalLength: basis.convolved.length,
+          bandSoloEnabled: bandOptions.soloEnabled,
+          bandMinHz: bandOptions.minHz,
+          bandMaxHz: bandOptions.maxHz,
+        };
+        const transfer: Transferable[] = [
+          ...wetChannels.map((channel) => channel.buffer),
+          ...dryChannels.map((channel) => channel.buffer),
+          gains.buffer,
+        ];
+
+        worker.postMessage({ type: "compute-residual", requestId, payload }, transfer);
+      });
+    },
+    [],
+  );
+
   useEffect(() => {
     let cancelled = false;
 
@@ -356,32 +508,73 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
       const music = musicBufRef.current;
       const ir = irBufRef.current;
       if (!music || !ir) {
+        residualBasisRef.current = null;
         residualBufRef.current = null;
         if (!cancelled) {
           setKPerCh(null);
           setLatencySamples(0);
+          setResidualComputing(false);
         }
         return;
       }
 
-      try {
-        const result = await buildResidualBuffer(music, ir);
-        if (cancelled) return;
-        if (!result) {
+      let basis = residualBasisRef.current;
+      const needsBasis =
+        !basis || basis.music !== music || basis.ir !== ir;
+
+      if (needsBasis) {
+        if (!cancelled) setResidualComputing(true);
+        try {
+          const prepared = await prepareResidualBasis(music, ir);
+          if (cancelled) return;
+          if (!prepared) {
+            residualBasisRef.current = null;
+            residualBufRef.current = null;
+            setKPerCh(null);
+            setLatencySamples(0);
+            setResidualComputing(false);
+            return;
+          }
+          residualBasisRef.current = prepared;
+          basis = prepared;
+          setLatencySamples(prepared.offset);
+          setKPerCh(prepared.gains);
+        } catch (err) {
+          if (cancelled) return;
+          console.error("Residual preparation failed", err);
+          residualBasisRef.current = null;
           residualBufRef.current = null;
           setKPerCh(null);
           setLatencySamples(0);
+          setResidualComputing(false);
           return;
         }
-        residualBufRef.current = result.buffer;
-        setLatencySamples(result.offset);
-        setKPerCh(result.gains);
+      }
+
+      if (!basis) return;
+
+      if (!cancelled) setResidualComputing(true);
+      try {
+        const residual = await computeResidualWithWorker(basis, differenceThresholdDb, {
+          soloEnabled: soloBandEnabled,
+          minHz: soloBandMinHz,
+          maxHz: soloBandMaxHz,
+        });
+        if (cancelled) return;
+        residualBufRef.current = residual;
       } catch (err) {
         if (cancelled) return;
-        console.error("Residual computation failed", err);
-        residualBufRef.current = null;
-        setKPerCh(null);
-        setLatencySamples(0);
+        console.warn("Residual worker failed; using fallback residual", err);
+        residualBufRef.current = ensureMonoBuffer(basis.fallbackResidual);
+      } finally {
+        if (!cancelled) {
+          setResidualComputing(false);
+          if (mode === "difference" && isPlaying) {
+            const off = currentOffset();
+            teardownGraph();
+            makeGraphRef.current?.(off, "difference");
+          }
+        }
       }
     };
 
@@ -389,8 +582,89 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
 
     return () => {
       cancelled = true;
+      setResidualComputing(false);
     };
-  }, [musicBuffer, irBuffer]);
+  }, [
+    musicBuffer,
+    irBuffer,
+    differenceThresholdDb,
+    soloBandEnabled,
+    soloBandMinHz,
+    soloBandMaxHz,
+    isPlaying,
+    mode,
+    computeResidualWithWorker,
+  ]);
+
+  useEffect(() => {
+    setPendingDifferenceThresholdDb(differenceThresholdDb);
+  }, [differenceThresholdDb]);
+
+  useEffect(() => {
+    setPendingSoloBandEnabled(soloBandEnabled);
+  }, [soloBandEnabled]);
+
+  useEffect(() => {
+    setPendingSoloBandHz([soloBandMinHz, soloBandMaxHz]);
+  }, [soloBandMinHz, soloBandMaxHz]);
+
+  useEffect(() => {
+    const { worker, error } = createModuleWorker(new URL("./workers/residualWorker.ts", import.meta.url));
+    if (!worker) {
+      if (error) {
+        console.warn("Residual worker unavailable; falling back to main-thread processing.", error);
+      }
+      residualWorkerRef.current = null;
+      return;
+    }
+    residualWorkerRef.current = worker;
+    const pendingRequests = residualPendingRef.current;
+
+    const handleMessage = (event: MessageEvent<ResidualWorkerMessage>) => {
+      const data = event.data;
+      if (!data || typeof data.requestId !== "number") return;
+      const pending = residualPendingRef.current.get(data.requestId);
+      if (!pending) return;
+      residualPendingRef.current.delete(data.requestId);
+      if (data.type === "residual-ready") {
+        try {
+          const buffer = new AudioBuffer({
+            numberOfChannels: 1,
+            length: data.payload.channelData.length,
+            sampleRate: data.payload.sampleRate,
+          });
+          buffer.getChannelData(0).set(data.payload.channelData);
+          limitPeakInPlace(buffer, -0.3);
+          pending.resolve(buffer);
+        } catch (err) {
+          pending.reject(err instanceof Error ? err : new Error("Residual conversion failed"));
+        }
+      } else {
+        pending.reject(new Error(data.error || "Residual worker error"));
+      }
+    };
+
+    const handleError = (event: ErrorEvent) => {
+      residualPendingRef.current.forEach(({ reject }) => {
+        reject(new Error(event.message || "Residual worker error"));
+      });
+      residualPendingRef.current.clear();
+    };
+
+    worker.addEventListener("message", handleMessage);
+    worker.addEventListener("error", handleError);
+
+    return () => {
+      worker.removeEventListener("message", handleMessage);
+      worker.removeEventListener("error", handleError);
+      worker.terminate();
+      residualWorkerRef.current = null;
+      pendingRequests.forEach(({ reject }) => {
+        reject(new Error("Residual worker terminated"));
+      });
+      pendingRequests.clear();
+    };
+  }, []);
 
   function onChangeMode(next: Mode) {
     if (next === mode) return;
@@ -660,22 +934,57 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
   }
 
   async function renderAndExportDifference() {
-    if (!musicBufRef.current || !irBufRef.current) {
+    const music = musicBufRef.current;
+    const ir = irBufRef.current;
+    if (!music || !ir) {
       setStatus("Load music and IR first.");
       return;
     }
 
-    try {
-      const result = await buildResidualBuffer(musicBufRef.current, irBufRef.current);
-      if (!result) {
-        setStatus("Difference render failed: missing buffers.");
-        return;
-      }
-      residualBufRef.current = result.buffer;
-      setLatencySamples(result.offset);
-      setKPerCh(result.gains);
+    setResidualComputing(true);
 
-      const wav = audioBufferToWav(result.buffer, 16);
+    let basis = residualBasisRef.current;
+    try {
+      if (!basis || basis.music !== music || basis.ir !== ir) {
+        const prepared = await prepareResidualBasis(music, ir);
+        if (!prepared) {
+          setStatus("Difference render failed: missing buffers.");
+          return;
+        }
+        residualBasisRef.current = prepared;
+        basis = prepared;
+        setLatencySamples(prepared.offset);
+        setKPerCh(prepared.gains);
+      }
+    } catch (err) {
+      console.error("Difference render preparation failed", err);
+      setResidualComputing(false);
+      setStatus("Difference render failed: preparation error.");
+      return;
+    }
+
+    if (!basis) {
+      setStatus("Difference render failed: missing buffers.");
+      setResidualComputing(false);
+      return;
+    }
+
+    let residual: AudioBuffer;
+    try {
+      residual = await computeResidualWithWorker(basis, differenceThresholdDb, {
+        soloEnabled: soloBandEnabled,
+        minHz: soloBandHz[0],
+        maxHz: soloBandHz[1],
+      });
+    } catch (err) {
+      console.warn("Difference export worker failed, using fallback residual", err);
+      residual = ensureMonoBuffer(basis.fallbackResidual);
+    }
+
+    residualBufRef.current = residual;
+
+    try {
+      const wav = audioBufferToWav(residual, 16);
       const blob = new Blob([wav], { type: "audio/wav" });
       if (differenceDownloadUrl) {
         try {
@@ -690,6 +999,8 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setStatus(`Difference render failed: ${message}`);
+    } finally {
+      setResidualComputing(false);
     }
   }
 
@@ -732,12 +1043,42 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
               <h2 className="panel-title">Session status</h2>
               <p className="panel-desc">Track file loading, rendering progress, and export readiness.</p>
             </div>
+            {formattedKPerCh && (
+              <button
+                type="button"
+                className="status-panel__info-button"
+                onClick={() => setStatusInfoOpen((prev) => !prev)}
+                aria-expanded={isStatusInfoOpen}
+                aria-controls="session-status-metrics"
+                aria-label={
+                  isStatusInfoOpen
+                    ? "Hide difference latency and per-channel gain details"
+                    : "Show difference latency and per-channel gain details"
+                }
+              >
+                ?
+              </button>
+            )}
           </div>
           <pre>{status}</pre>
-          {formattedKPerCh && (
-            <div className="status-metrics">
-              <div>Difference latency: {latencySamples} samples ({latencyMs.toFixed(2)} ms)</div>
-              <div>k per ch: {kPerChDisplay}</div>
+          {formattedKPerCh && isStatusInfoOpen && (
+            <div className="status-metrics" id="session-status-metrics">
+              <p className="status-metrics__intro">
+                Difference latency is the offset used to align the residual playback with the source track. k per channel
+                lists the gain matching applied to each channel while preparing the difference render.
+              </p>
+              <div className="status-metrics__values">
+                <div className="status-metrics__item">
+                  <span className="status-metrics__label">Difference latency</span>
+                  <span className="status-metrics__value">
+                    {latencySamples} samples ({latencyMs.toFixed(2)} ms)
+                  </span>
+                </div>
+                <div className="status-metrics__item">
+                  <span className="status-metrics__label">k per channel</span>
+                  <span className="status-metrics__value">{kPerChDisplay}</span>
+                </div>
+              </div>
             </div>
           )}
         </section>
@@ -819,6 +1160,51 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
                 onSkipForward={() => skipBy(10)}
                 onSkipBackward={() => skipBy(-10)}
               />
+              <div className="inline-diff-graph">
+                <div className="panel-header" style={{ marginTop: 8 }}>
+                  <div>
+                    <h3 className="panel-title" style={{ fontSize: 14 }}>Difference Quick Adjust</h3>
+                    <p className="panel-desc">Adjust absolute difference threshold while listening.</p>
+                  </div>
+                </div>
+                <FRDifference
+                  compact
+                  musicBuffer={musicBufRef.current}
+                  irBuffer={irBuffer}
+                  sampleRate={sessionSampleRate}
+                  absMode={differenceAbsMode}
+                  onChangeAbsMode={setDifferenceAbsMode}
+                  thresholdDb={pendingDifferenceThresholdDb}
+                  onChangeThresholdDb={setPendingDifferenceThresholdDb}
+                  bandSoloEnabled={pendingSoloBandEnabled}
+                  onChangeBandSoloEnabled={setPendingSoloBandEnabled}
+                  bandMinHz={pendingSoloBandHz[0]}
+                  bandMaxHz={pendingSoloBandHz[1]}
+                  onChangeBandHz={(min, max) => setPendingSoloBandHz([min, max])}
+                />
+                <div className="inline-diff-actions">
+                  <button
+                    type="button"
+                    className="control-button button-ghost"
+                    onClick={applyDifferenceThreshold}
+                    disabled={!differenceControlsDirty || isResidualComputing}
+                  >
+                    {isResidualComputing ? "Applying..." : "Apply Threshold"}
+                  </button>
+                  <button
+                    type="button"
+                    className="control-button button-ghost"
+                    onClick={resetDifferenceThreshold}
+                    disabled={!differenceControlsDirty || isResidualComputing}
+                  >
+                    Reset
+                  </button>
+                  <div className="inline-diff-status" aria-live="polite">
+                    {differenceControlsDirty && !isResidualComputing && "Pending changes"}
+                    {isResidualComputing && "Updating difference..."}
+                  </div>
+                </div>
+              </div>
             </section>
 
             <ExportBar
@@ -846,7 +1232,20 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
                 <p className="panel-desc">Inspect how the convolved playback deviates from the original.</p>
               </div>
             </div>
-            <FRDifference musicBuffer={musicBufRef.current} irBuffer={irBuffer} sampleRate={sessionSampleRate} />
+            <FRDifference
+              musicBuffer={musicBufRef.current}
+              irBuffer={irBuffer}
+              sampleRate={sessionSampleRate}
+              absMode={differenceAbsMode}
+              onChangeAbsMode={setDifferenceAbsMode}
+              thresholdDb={pendingDifferenceThresholdDb}
+              onChangeThresholdDb={setPendingDifferenceThresholdDb}
+              bandSoloEnabled={pendingSoloBandEnabled}
+              onChangeBandSoloEnabled={setPendingSoloBandEnabled}
+              bandMinHz={pendingSoloBandHz[0]}
+              bandMaxHz={pendingSoloBandHz[1]}
+              onChangeBandHz={(min, max) => setPendingSoloBandHz([min, max])}
+            />
           </section>
         ) : (
           <section className="panel frpink-panel">
@@ -912,31 +1311,27 @@ export default function App() {
 }
 
 
-async function buildResidualBuffer(
-  music: AudioBuffer | null,
-  ir: AudioBuffer | null
-): Promise<{
-  buffer: AudioBuffer;
-  offset: number;
-  gains: number[];
-} | null> {
-  if (!music || !ir) return null;
-
+async function prepareResidualBasis(music: AudioBuffer, ir: AudioBuffer): Promise<ResidualBasis | null> {
   const targetRate = music.sampleRate;
-  const dry = music;
-  const irForOffline =
-    ir.sampleRate === targetRate ? ir : resampleAudioBuffer(ir, targetRate);
-  const offlineLength = Math.max(1, dry.length + irForOffline.length - 1);
-  const offline = new OfflineAudioContext(dry.numberOfChannels, offlineLength, targetRate);
-  const src = new AudioBufferSourceNode(offline, { buffer: dry });
+  const irForOffline = ir.sampleRate === targetRate ? ir : resampleAudioBuffer(ir, targetRate);
+  const offlineLength = Math.max(1, music.length + irForOffline.length - 1);
+  const offline = new OfflineAudioContext(music.numberOfChannels, offlineLength, targetRate);
+  const src = new AudioBufferSourceNode(offline, { buffer: music });
   const conv = new ConvolverNode(offline, { buffer: irForOffline, disableNormalization: false });
   src.connect(conv).connect(offline.destination);
   src.start();
   const rendered = await offline.startRendering();
   const offset = computeAnalysisOffset(irForOffline, rendered.length);
-  const { residual, gains } = makeResidualBuffer(rendered, dry, offset);
+  const { residual, gains } = makeResidualBuffer(rendered, music, offset);
   limitPeakInPlace(residual, -0.3);
-  return { buffer: residual, offset, gains };
+  return {
+    music,
+    ir,
+    convolved: rendered,
+    offset,
+    gains,
+    fallbackResidual: ensureMonoBuffer(residual),
+  };
 }
 
 function makeResidualBuffer(
@@ -990,6 +1385,28 @@ function makeResidualBuffer(
   return { residual, gains };
 }
 
+function ensureMonoBuffer(buffer: AudioBuffer): AudioBuffer {
+  if (buffer.numberOfChannels <= 1) {
+    return buffer;
+  }
+  const { length, sampleRate } = buffer;
+  const mono = new AudioBuffer({ numberOfChannels: 1, length, sampleRate });
+  const target = mono.getChannelData(0);
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const data = buffer.getChannelData(ch);
+    for (let i = 0; i < length; i++) {
+      target[i] += data[i];
+    }
+  }
+  const inv = 1 / buffer.numberOfChannels;
+  for (let i = 0; i < length; i++) {
+    target[i] *= inv;
+  }
+  limitPeakInPlace(mono, -0.3);
+  return mono;
+}
+
+// === Magnitude-threshold masking ===
 function limitPeakInPlace(buf: AudioBuffer, ceilingDb = -0.3) {
   if (buf.sampleRate <= 0) return;
   const ceiling = Math.pow(10, ceilingDb / 20);

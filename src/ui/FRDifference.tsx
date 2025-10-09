@@ -1,7 +1,8 @@
 // WHY: Visualises the delta between dry and convolved playback spectra.
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ComponentProps } from "react";
 import Plotly from "plotly.js-dist-min";
 import createPlotlyComponent from "react-plotly.js/factory";
+import { createModuleWorker } from "../utils/workerSupport";
 
 type SmoothingMode = "1/24" | "1/12" | "1/6" | "1/3";
 
@@ -30,6 +31,17 @@ type Props = {
   musicBuffer: AudioBuffer | null;
   irBuffer: AudioBuffer | null;
   sampleRate: number;
+  compact?: boolean;
+  // Controlled props (optional) so parent can sync threshold/abs across instances
+  thresholdDb?: number;
+  onChangeThresholdDb?: (v: number) => void;
+  absMode?: boolean;
+  onChangeAbsMode?: (v: boolean) => void;
+  bandSoloEnabled?: boolean;
+  bandMinHz?: number;
+  bandMaxHz?: number;
+  onChangeBandSoloEnabled?: (v: boolean) => void;
+  onChangeBandHz?: (min: number, max: number) => void;
 };
 
 const Plot = createPlotlyComponent(Plotly);
@@ -44,6 +56,37 @@ const MAX_FREQ = 20000;
 const LOG_MIN = Math.log10(MIN_FREQ);
 const LOG_MAX = Math.log10(MAX_FREQ);
 const DEFAULT_LOG_RANGE: [number, number] = [LOG_MIN, LOG_MAX];
+const BAND_SLIDER_MIN = 0;
+const BAND_SLIDER_MAX = 1000;
+const MIN_BAND_GAP_HZ = 1;
+
+function freqToSliderValue(freq: number): number {
+  const clamped = Math.min(Math.max(freq, MIN_FREQ), MAX_FREQ);
+  const norm = (Math.log10(clamped) - LOG_MIN) / (LOG_MAX - LOG_MIN);
+  return BAND_SLIDER_MIN + norm * (BAND_SLIDER_MAX - BAND_SLIDER_MIN);
+}
+
+function sliderValueToFreq(value: number): number {
+  const norm = (value - BAND_SLIDER_MIN) / (BAND_SLIDER_MAX - BAND_SLIDER_MIN);
+  const logValue = LOG_MIN + norm * (LOG_MAX - LOG_MIN);
+  return Math.pow(10, logValue);
+}
+
+function clampBandRange(minHz: number, maxHz: number): [number, number] {
+  const min = Math.max(MIN_FREQ, Math.min(minHz, MAX_FREQ - MIN_BAND_GAP_HZ));
+  let max = Math.max(min + MIN_BAND_GAP_HZ, Math.min(maxHz, MAX_FREQ));
+  if (max - min < MIN_BAND_GAP_HZ) {
+    max = Math.min(MAX_FREQ, min + MIN_BAND_GAP_HZ);
+  }
+  return [min, max];
+}
+
+function formatHz(value: number): string {
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(value >= 10000 ? 1 : 2)} kHz`;
+  }
+  return `${value.toFixed(0)} Hz`;
+}
 
 const smoothingOptions: Array<{ value: SmoothingMode; label: string }> = [
   { value: "1/24", label: "1/24 octave" },
@@ -52,12 +95,80 @@ const smoothingOptions: Array<{ value: SmoothingMode; label: string }> = [
   { value: "1/3", label: "1/3 octave" },
 ];
 
-export default function FRDifference({ musicBuffer, irBuffer, sampleRate }: Props) {
+export default function FRDifference({
+  musicBuffer,
+  irBuffer,
+  sampleRate,
+  compact = false,
+  thresholdDb: thresholdDbProp,
+  onChangeThresholdDb,
+  absMode,
+  onChangeAbsMode,
+  bandSoloEnabled: bandSoloEnabledProp,
+  bandMinHz: bandMinHzProp,
+  bandMaxHz: bandMaxHzProp,
+  onChangeBandSoloEnabled,
+  onChangeBandHz,
+}: Props) {
   const [smoothing, setSmoothing] = useState<SmoothingMode>("1/6");
   const [spectra, setSpectra] = useState<DifferenceSpectra | null>(null);
   const [isLoading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [workerReady, setWorkerReady] = useState(false);
+
+  // New: absolute (fold negatives) display + threshold control ("move the 0 line")
+  const [useAbsoluteState, setUseAbsoluteState] = useState<boolean>(true);
+  const [thresholdDbState, setThresholdDbState] = useState<number>(0);
+  const useAbsolute = typeof absMode === "boolean" ? absMode : useAbsoluteState;
+  const thresholdDb = typeof thresholdDbProp === "number" ? thresholdDbProp : thresholdDbState;
+  const setUseAbsolute = (v: boolean) => {
+    if (onChangeAbsMode) onChangeAbsMode(v);
+    else setUseAbsoluteState(v);
+  };
+  const setThresholdDb = (v: number) => {
+    if (onChangeThresholdDb) onChangeThresholdDb(v);
+    else setThresholdDbState(v);
+  };
+  const [bandSoloState, setBandSoloState] = useState<boolean>(false);
+  const [bandRangeState, setBandRangeState] = useState<[number, number]>([MIN_FREQ, MAX_FREQ]);
+  const bandSoloEnabled = typeof bandSoloEnabledProp === "boolean" ? bandSoloEnabledProp : bandSoloState;
+  const bandMinHz = typeof bandMinHzProp === "number" ? bandMinHzProp : bandRangeState[0];
+  const bandMaxHz = typeof bandMaxHzProp === "number" ? bandMaxHzProp : bandRangeState[1];
+  const setBandSolo = (v: boolean) => {
+    if (onChangeBandSoloEnabled) onChangeBandSoloEnabled(v);
+    else setBandSoloState(v);
+  };
+  const setBandRange = (min: number, max: number) => {
+    const [nextMin, nextMax] = clampBandRange(min, max);
+    if (onChangeBandHz) onChangeBandHz(nextMin, nextMax);
+    else setBandRangeState([nextMin, nextMax]);
+  };
+  const bandMinSlider = freqToSliderValue(bandMinHz);
+  const bandMaxSlider = freqToSliderValue(bandMaxHz);
+  const sliderSpan = BAND_SLIDER_MAX - BAND_SLIDER_MIN || 1;
+  const sliderClamp = (value: number) => Math.min(100, Math.max(0, value));
+  const sliderStart = sliderClamp(
+    ((Math.min(bandMinSlider, bandMaxSlider) - BAND_SLIDER_MIN) / sliderSpan) * 100,
+  );
+  const sliderEnd = sliderClamp(
+    ((Math.max(bandMinSlider, bandMaxSlider) - BAND_SLIDER_MIN) / sliderSpan) * 100,
+  );
+  const sliderSelectionWidth = Math.max(1, sliderEnd - sliderStart);
+  const bandRangeLabel = `${formatHz(bandMinHz)} - ${formatHz(bandMaxHz)}`;
+
+  const handleBandMinChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const sliderValue = Number(event.currentTarget.value);
+    const freq = sliderValueToFreq(sliderValue);
+    const nextMin = Math.min(freq, bandMaxHz - MIN_BAND_GAP_HZ);
+    setBandRange(nextMin, bandMaxHz);
+  };
+
+  const handleBandMaxChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const sliderValue = Number(event.currentTarget.value);
+    const freq = sliderValueToFreq(sliderValue);
+    const nextMax = Math.max(freq, bandMinHz + MIN_BAND_GAP_HZ);
+    setBandRange(bandMinHz, nextMax);
+  };
 
   const workerRef = useRef<Worker | null>(null);
   const requestIdRef = useRef(0);
@@ -132,7 +243,15 @@ export default function FRDifference({ musicBuffer, irBuffer, sampleRate }: Prop
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const worker = new Worker(new URL("../workers/dspWorker.ts", import.meta.url), { type: "module" });
+    const { worker, error } = createModuleWorker(new URL("../workers/dspWorker.ts", import.meta.url));
+    if (!worker) {
+      if (error) {
+        console.warn("Difference FR worker unavailable.", error);
+      }
+      setWorkerReady(false);
+      setError("Difference analysis is unavailable in this browser (missing Web Worker support).");
+      return;
+    }
     workerRef.current = worker;
     setWorkerReady(true);
 
@@ -219,16 +338,20 @@ export default function FRDifference({ musicBuffer, irBuffer, sampleRate }: Prop
     if (!spectra?.diffDb || !spectra.wetDb) return null;
     const freqs = Array.from(spectra.freqs);
     const sanitizedFreqs = freqs.map((hz) => (hz > 0 ? hz : MIN_FREQ));
+    const y = useAbsolute
+      ? spectra.diffDb.map((v) => Math.abs(v))
+      : Array.from(spectra.diffDb);
+    const name = useAbsolute ? "|Wet − Dry| (dB)" : "Wet − Dry (dB)";
     return {
       type: "scatter" as const,
       mode: "lines" as const,
-      name: "Wet - Dry (dB)",
+      name,
       x: sanitizedFreqs,
-      y: spectra.diffDb,
+      y,
       line: { color: "#ff7b84", width: 2 },
       hovertemplate: "<b>%{x:.0f} Hz</b><br>%{y:.2f} dB<extra></extra>",
     };
-  }, [spectra]);
+  }, [spectra, useAbsolute]);
 
   useEffect(() => {
     if (!spectra) return;
@@ -258,6 +381,80 @@ export default function FRDifference({ musicBuffer, irBuffer, sampleRate }: Prop
       setLoading(false);
     }
   };
+
+  // Update layout shapes/title when absolute/threshold/band settings change
+  useEffect(() => {
+    setLayout((prevLayout: PlotLayout) => {
+      const base: PlotLayout = { ...prevLayout };
+      const shapes: NonNullable<PlotLayout["shapes"]> = [];
+      if (bandSoloEnabled) {
+        const x0 = Math.max(MIN_FREQ, bandMinHz);
+        const x1 = Math.min(MAX_FREQ, bandMaxHz);
+        shapes.push({
+          type: "rect",
+          xref: "x",
+          x0,
+          x1,
+          yref: "paper",
+          y0: 0,
+          y1: 1,
+          fillcolor: "rgba(10, 132, 255, 0.08)",
+          line: { width: 0 },
+          layer: "below",
+        });
+      }
+      shapes.push(
+        {
+          type: "line",
+          xref: "paper",
+          x0: 0,
+          x1: 1,
+          yref: "y",
+          y0: 0,
+          y1: 0,
+          line: { color: "rgba(255,255,255,0.3)", width: 1, dash: "dot" },
+        },
+      );
+      if (useAbsolute && thresholdDb > 0) {
+        shapes.push({
+          type: "line",
+          xref: "paper",
+          x0: 0,
+          x1: 1,
+          yref: "y",
+          y0: thresholdDb,
+          y1: thresholdDb,
+          line: { color: "rgba(255,255,255,0.6)", width: 1, dash: "dash" },
+        });
+      }
+      base.shapes = shapes;
+      base.annotations = bandSoloEnabled
+        ? [
+            {
+              xref: "paper",
+              x: 1,
+              xanchor: "right",
+              yref: "paper",
+              y: 1.08,
+              showarrow: false,
+              align: "right",
+              font: { size: 12, color: "rgba(220, 236, 255, 0.9)" },
+              text: `Solo band: ${formatHz(Math.max(MIN_FREQ, bandMinHz))} - ${formatHz(
+                Math.min(MAX_FREQ, bandMaxHz),
+              )}`,
+            },
+          ]
+        : [];
+      base.yaxis = {
+        ...base.yaxis,
+        title: {
+          text: useAbsolute ? "Absolute magnitude delta (dB)" : "Magnitude delta (dB)",
+          ...(base.yaxis && (base.yaxis as PlotLayout["yaxis"]).title ? (base.yaxis as PlotLayout["yaxis"]).title : {}),
+        },
+      } as PlotLayout["yaxis"];
+      return base;
+    });
+  }, [useAbsolute, thresholdDb, bandSoloEnabled, bandMinHz, bandMaxHz]);
 
   const config = useMemo<PlotConfig>(
     () => ({
@@ -300,6 +497,93 @@ export default function FRDifference({ musicBuffer, irBuffer, sampleRate }: Prop
             })}
           </div>
         </div>
+        <div className="frpink-segment">
+          <span className="frpink-segment__label">Display</span>
+          <div className="frpink-segment__control" role="group" aria-label="Display mode">
+            <button
+              type="button"
+              className={`frpink-segment__button${useAbsolute ? " is-active" : ""}`}
+              aria-pressed={useAbsolute}
+              onClick={() => setUseAbsolute(true)}
+            >
+              Absolute |Δ|
+            </button>
+            <button
+              type="button"
+              className={`frpink-segment__button${!useAbsolute ? " is-active" : ""}`}
+              aria-pressed={!useAbsolute}
+              onClick={() => setUseAbsolute(false)}
+            >
+              Signed Δ
+            </button>
+          </div>
+        </div>
+        {useAbsolute && (
+          <div className="frpink-segment" style={{ minWidth: 240 }}>
+            <span className="frpink-segment__label">Threshold (dB)</span>
+            <div className="frpink-segment__control" style={{ padding: "0 8px", width: "100%" }}>
+              <input
+                type="range"
+                min={0}
+                max={12}
+                step={0.1}
+                value={thresholdDb}
+                aria-label="Difference threshold in dB"
+                onChange={(e) => setThresholdDb(Number(e.currentTarget.value))}
+                style={{ width: "100%" }}
+              />
+              <div style={{ textAlign: "right", fontSize: 12, opacity: 0.8 }}>{thresholdDb.toFixed(1)} dB</div>
+            </div>
+          </div>
+        )}
+        <div className="frpink-segment frdifference-band-segment">
+          <span className="frpink-segment__label">Solo band</span>
+          <div className="frdifference-band-segment__row">
+            <button
+              type="button"
+              className={`frpink-segment__button${bandSoloEnabled ? " is-active" : ""}`}
+              aria-pressed={bandSoloEnabled}
+              onClick={() => setBandSolo(!bandSoloEnabled)}
+            >
+              {bandSoloEnabled ? "Solo on" : "Solo off"}
+            </button>
+            <div className="frdifference-band-readout" role="text" aria-live="polite">
+              <span>{formatHz(Math.max(MIN_FREQ, bandMinHz))}</span>
+              <span className="frdifference-band-readout__dash">-</span>
+              <span>{formatHz(Math.min(MAX_FREQ, bandMaxHz))}</span>
+            </div>
+          </div>
+          <div
+            className={`frdifference-band-slider${bandSoloEnabled ? "" : " is-muted"}`}
+            aria-label={`Solo band frequency range ${bandRangeLabel}`}
+          >
+            <div className="frdifference-band-slider__track" />
+            <div
+              className="frdifference-band-slider__selection"
+              style={{ left: `${sliderStart}%`, width: `${sliderSelectionWidth}%` }}
+            />
+            <input
+              type="range"
+              min={BAND_SLIDER_MIN}
+              max={BAND_SLIDER_MAX}
+              step={1}
+              value={bandMinSlider}
+              onChange={handleBandMinChange}
+              aria-label="Solo band start frequency"
+              className="frdifference-band-slider__input"
+            />
+            <input
+              type="range"
+              min={BAND_SLIDER_MIN}
+              max={BAND_SLIDER_MAX}
+              step={1}
+              value={bandMaxSlider}
+              onChange={handleBandMaxChange}
+              aria-label="Solo band end frequency"
+              className="frdifference-band-slider__input frdifference-band-slider__input--upper"
+            />
+          </div>
+        </div>
       </div>
 
       {error && <div className="frpink-message frpink-message--error">{error}</div>}
@@ -325,7 +609,7 @@ export default function FRDifference({ musicBuffer, irBuffer, sampleRate }: Prop
             layout={layout}
             config={config}
             useResizeHandler
-            style={{ width: "100%", height: "100%", minHeight: 320 }}
+            style={{ width: "100%", height: "100%", minHeight: compact ? 220 : 320 }}
             onRelayout={handleRelayout}
             onAfterPlot={handleAfterPlot}
           />
