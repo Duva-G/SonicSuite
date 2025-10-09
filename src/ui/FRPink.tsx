@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
 import Plotly from "plotly.js-dist-min";
 import createPlotlyComponent from "react-plotly.js/factory";
+import { createModuleWorker } from "../utils/workerSupport";
 
 type SmoothingMode = "1/12" | "1/6" | "1/3";
 
@@ -123,7 +124,15 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const worker = new Worker(new URL("../workers/dspWorker.ts", import.meta.url), { type: "module" });
+    const { worker, error } = createModuleWorker(new URL("../workers/dspWorker.ts", import.meta.url));
+    if (!worker) {
+      if (error) {
+        console.warn("Pink-noise analysis worker unavailable.", error);
+      }
+      setWorkerReady(false);
+      setError("Pink-noise analysis is unavailable in this browser (missing Web Worker support).");
+      return;
+    }
     workerRef.current = worker;
     setWorkerReady(true);
 
