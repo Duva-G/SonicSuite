@@ -1,5 +1,16 @@
 // WHY: Visualises the delta between dry and convolved playback spectra.
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ComponentProps } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useId,
+  type ChangeEvent,
+  type ComponentProps,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import Plotly from "plotly.js-dist-min";
 import createPlotlyComponent from "react-plotly.js/factory";
 import { createModuleWorker } from "../utils/workerSupport";
@@ -95,6 +106,101 @@ const smoothingOptions: Array<{ value: SmoothingMode; label: string }> = [
   { value: "1/3", label: "1/3 octave" },
 ];
 
+const THRESHOLD_MIN = 0;
+const THRESHOLD_MAX = 12;
+const THRESHOLD_STEP = 0.1;
+const AUTO_THRESHOLD_PERCENTILE = 0.8;
+const PRESET_TOLERANCE_HZ = 1;
+
+const SOLO_PRESETS: Array<{ value: string; label: string; range: [number, number] }> = [
+  { value: "full", label: "Full", range: [MIN_FREQ, MAX_FREQ] },
+  { value: "bass", label: "Bass", range: [20, 200] },
+  { value: "vocals", label: "Vocals", range: [200, 5000] },
+  { value: "air", label: "Air", range: [8000, 20000] },
+];
+
+function derivePresetValue(minHz: number, maxHz: number): string {
+  for (const preset of SOLO_PRESETS) {
+    if (
+      Math.abs(preset.range[0] - minHz) <= PRESET_TOLERANCE_HZ &&
+      Math.abs(preset.range[1] - maxHz) <= PRESET_TOLERANCE_HZ
+    ) {
+      return preset.value;
+    }
+  }
+  return "custom";
+}
+
+type InfoTipProps = {
+  label: string;
+  tooltipId?: string;
+  placement?: "center" | "left";
+  children: ReactNode;
+};
+
+function InfoTip({ label, tooltipId, placement = "center", children }: InfoTipProps) {
+  const fallbackId = useId();
+  const id = tooltipId ?? fallbackId;
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        buttonRef.current?.blur();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <span className="frinfo">
+      <button
+        ref={buttonRef}
+        type="button"
+        className="frinfo__button"
+        aria-label={label}
+        aria-expanded={open}
+        aria-controls={id}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+      >
+        i
+      </button>
+      <span
+        id={id}
+        role="tooltip"
+        className={`frinfo__tooltip${placement === "left" ? " frinfo__tooltip--left" : ""}${open ? " is-open" : ""}`}
+      >
+        {children}
+      </span>
+    </span>
+  );
+}
+
+function clampThreshold(value: number): number {
+  if (Number.isNaN(value)) return THRESHOLD_MIN;
+  return Math.min(THRESHOLD_MAX, Math.max(THRESHOLD_MIN, value));
+}
+
+function percentile(values: number[], fraction: number): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = fraction * (sorted.length - 1);
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return sorted[lower];
+  const weight = index - lower;
+  return sorted[lower] * (1 - weight) + sorted[upper] * weight;
+}
+
 export default function FRDifference({
   musicBuffer,
   irBuffer,
@@ -119,21 +225,46 @@ export default function FRDifference({
   // New: absolute (fold negatives) display + threshold control ("move the 0 line")
   const [useAbsoluteState, setUseAbsoluteState] = useState<boolean>(true);
   const [thresholdDbState, setThresholdDbState] = useState<number>(0);
+  const [showAdvanced, setShowAdvanced] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      const stored = window.localStorage.getItem("frdifference.showAdvanced");
+      return stored === "true";
+    } catch {
+      return false;
+    }
+  });
   const useAbsolute = typeof absMode === "boolean" ? absMode : useAbsoluteState;
   const thresholdDb = typeof thresholdDbProp === "number" ? thresholdDbProp : thresholdDbState;
-  const setUseAbsolute = (v: boolean) => {
-    if (onChangeAbsMode) onChangeAbsMode(v);
-    else setUseAbsoluteState(v);
-  };
-  const setThresholdDb = (v: number) => {
-    if (onChangeThresholdDb) onChangeThresholdDb(v);
-    else setThresholdDbState(v);
-  };
+  const setUseAbsolute = useCallback(
+    (v: boolean) => {
+      if (onChangeAbsMode) onChangeAbsMode(v);
+      else setUseAbsoluteState(v);
+    },
+    [onChangeAbsMode]
+  );
+  const setThresholdDb = useCallback(
+    (v: number) => {
+      if (onChangeThresholdDb) onChangeThresholdDb(v);
+      else setThresholdDbState(v);
+    },
+    [onChangeThresholdDb]
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem("frdifference.showAdvanced", String(showAdvanced));
+    } catch {
+      // ignore storage issues
+    }
+  }, [showAdvanced]);
   const [bandSoloState, setBandSoloState] = useState<boolean>(false);
   const [bandRangeState, setBandRangeState] = useState<[number, number]>([MIN_FREQ, MAX_FREQ]);
   const bandSoloEnabled = typeof bandSoloEnabledProp === "boolean" ? bandSoloEnabledProp : bandSoloState;
   const bandMinHz = typeof bandMinHzProp === "number" ? bandMinHzProp : bandRangeState[0];
   const bandMaxHz = typeof bandMaxHzProp === "number" ? bandMaxHzProp : bandRangeState[1];
+  const customPresetRequestRef = useRef(false);
+  const [bandPresetState, setBandPresetState] = useState<string>(() => derivePresetValue(bandMinHz, bandMaxHz));
   const setBandSolo = (v: boolean) => {
     if (onChangeBandSoloEnabled) onChangeBandSoloEnabled(v);
     else setBandSoloState(v);
@@ -155,11 +286,36 @@ export default function FRDifference({
   );
   const sliderSelectionWidth = Math.max(1, sliderEnd - sliderStart);
   const bandRangeLabel = `${formatHz(bandMinHz)} - ${formatHz(bandMaxHz)}`;
+  const thresholdTooltipId = useId();
+  const smoothingTooltipId = useId();
+  const displayTooltipId = useId();
+  const soloTooltipId = useId();
+  const thresholdLabelId = useId();
+  const smoothingLabelId = useId();
+  const displayLabelId = useId();
+  const soloLabelId = useId();
+  const thresholdHelperId = useId();
+  const derivedPreset = useMemo(
+    () => derivePresetValue(bandMinHz, bandMaxHz),
+    [bandMinHz, bandMaxHz]
+  );
+
+  useEffect(() => {
+    if (customPresetRequestRef.current) {
+      if (derivedPreset === "custom") {
+        customPresetRequestRef.current = false;
+      }
+      return;
+    }
+    setBandPresetState(derivedPreset);
+  }, [derivedPreset]);
 
   const handleBandMinChange = (event: ChangeEvent<HTMLInputElement>) => {
     const sliderValue = Number(event.currentTarget.value);
     const freq = sliderValueToFreq(sliderValue);
     const nextMin = Math.min(freq, bandMaxHz - MIN_BAND_GAP_HZ);
+    customPresetRequestRef.current = false;
+    setBandPresetState("custom");
     setBandRange(nextMin, bandMaxHz);
   };
 
@@ -167,7 +323,142 @@ export default function FRDifference({
     const sliderValue = Number(event.currentTarget.value);
     const freq = sliderValueToFreq(sliderValue);
     const nextMax = Math.max(freq, bandMinHz + MIN_BAND_GAP_HZ);
+    customPresetRequestRef.current = false;
+    setBandPresetState("custom");
     setBandRange(bandMinHz, nextMax);
+  };
+
+  const diffValues = useMemo(() => {
+    if (!spectra?.diffDb) return null;
+    return Array.from(spectra.diffDb);
+  }, [spectra]);
+
+  const absoluteDiffValues = useMemo(() => {
+    if (!diffValues) return null;
+    return diffValues.map((value) => Math.abs(value));
+  }, [diffValues]);
+
+  const displayedDiffValues = useMemo(() => {
+    if (!diffValues) return null;
+    return useAbsolute ? absoluteDiffValues ?? null : diffValues;
+  }, [absoluteDiffValues, diffValues, useAbsolute]);
+
+  const metrics = useMemo(() => {
+    if (!displayedDiffValues || !displayedDiffValues.length || !absoluteDiffValues) return null;
+    const len = displayedDiffValues.length;
+    const rms =
+      len === 0 ? 0 : Math.sqrt(displayedDiffValues.reduce((sum, value) => sum + value * value, 0) / len);
+    const peak = displayedDiffValues.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
+    const threshold = Math.max(thresholdDb, 0);
+    const aboveCount = absoluteDiffValues.reduce(
+      (count, value) => count + (value >= threshold ? 1 : 0),
+      0,
+    );
+    const percentAbove = len === 0 ? 0 : (aboveCount / len) * 100;
+    return { rms, peak, percentAbove };
+  }, [absoluteDiffValues, displayedDiffValues, thresholdDb]);
+
+  const metricsBadges = useMemo(() => {
+    if (!metrics) return [];
+    return [
+      { label: "RMS", value: `${metrics.rms.toFixed(1)} dB` },
+      { label: "Peak", value: `${metrics.peak.toFixed(1)} dB` },
+      { label: "% > threshold", value: `${Math.round(metrics.percentAbove)}%` },
+    ];
+  }, [metrics]);
+  const showMetrics = metricsBadges.length > 0;
+
+  const handlePresetChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const value = event.currentTarget.value;
+    if (value === "custom") {
+      customPresetRequestRef.current = true;
+      setBandPresetState("custom");
+      if (!bandSoloEnabled) setBandSolo(true);
+      return;
+    }
+    customPresetRequestRef.current = false;
+    setBandPresetState(value);
+    const preset = SOLO_PRESETS.find((option) => option.value === value);
+    if (preset) {
+      setBandRange(preset.range[0], preset.range[1]);
+      if (!bandSoloEnabled) setBandSolo(true);
+    }
+  };
+
+  const showSoloControls = bandSoloEnabled && bandPresetState === "custom";
+
+  const handleAutoThreshold = useCallback(() => {
+    if (!absoluteDiffValues || !absoluteDiffValues.length) return;
+    const value = percentile(absoluteDiffValues, AUTO_THRESHOLD_PERCENTILE);
+    if (value === null) return;
+    setThresholdDb(clampThreshold(Number(value.toFixed(1))));
+  }, [absoluteDiffValues, setThresholdDb]);
+
+  const handleThresholdSliderChange = (value: number) => {
+    setThresholdDb(clampThreshold(value));
+  };
+
+  const handleThresholdRangeChange = (event: ChangeEvent<HTMLInputElement>) => {
+    handleThresholdSliderChange(Number(event.currentTarget.value));
+  };
+
+  const handleThresholdNumberChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const raw = event.currentTarget.value;
+    if (raw === "") return;
+    handleThresholdSliderChange(Number(raw));
+  };
+
+  const handleThresholdKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
+    if (!keys.includes(event.key)) return;
+    event.preventDefault();
+    const delta = event.shiftKey ? 1 : THRESHOLD_STEP;
+    const direction = event.key === "ArrowRight" || event.key === "ArrowUp" ? 1 : -1;
+    handleThresholdSliderChange(thresholdDb + direction * delta);
+  };
+
+  const handleBandMinKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
+    if (!keys.includes(event.key)) return;
+    event.preventDefault();
+    const deltaHz = event.shiftKey ? 10 : 0.1;
+    const direction = event.key === "ArrowRight" || event.key === "ArrowUp" ? 1 : -1;
+    const nextMin = Math.max(MIN_FREQ, Math.min(MAX_FREQ, bandMinHz + direction * deltaHz));
+    customPresetRequestRef.current = false;
+    setBandPresetState("custom");
+    setBandRange(nextMin, bandMaxHz);
+  };
+
+  const handleBandMaxKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
+    if (!keys.includes(event.key)) return;
+    event.preventDefault();
+    const deltaHz = event.shiftKey ? 10 : 0.1;
+    const direction = event.key === "ArrowRight" || event.key === "ArrowUp" ? 1 : -1;
+    const nextMax = Math.max(MIN_FREQ, Math.min(MAX_FREQ, bandMaxHz + direction * deltaHz));
+    customPresetRequestRef.current = false;
+    setBandPresetState("custom");
+    setBandRange(bandMinHz, nextMax);
+  };
+
+  const updateBandFromInput = (min: number, max: number) => {
+    customPresetRequestRef.current = false;
+    setBandPresetState("custom");
+    setBandRange(min, max);
+  };
+
+  const handleBandMinInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const value = Number(event.currentTarget.value);
+    if (Number.isNaN(value)) return;
+    const clamped = Math.max(MIN_FREQ, Math.min(value, bandMaxHz - MIN_BAND_GAP_HZ));
+    updateBandFromInput(clamped, bandMaxHz);
+  };
+
+  const handleBandMaxInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const value = Number(event.currentTarget.value);
+    if (Number.isNaN(value)) return;
+    const clamped = Math.min(MAX_FREQ, Math.max(value, bandMinHz + MIN_BAND_GAP_HZ));
+    updateBandFromInput(bandMinHz, clamped);
   };
 
   const workerRef = useRef<Worker | null>(null);
@@ -335,23 +626,20 @@ export default function FRDifference({
   }, [workerReady, musicBuffer, irBuffer, sampleRate, smoothing]);
 
   const trace = useMemo(() => {
-    if (!spectra?.diffDb || !spectra.wetDb) return null;
+    if (!spectra?.diffDb || !spectra.wetDb || !displayedDiffValues) return null;
     const freqs = Array.from(spectra.freqs);
     const sanitizedFreqs = freqs.map((hz) => (hz > 0 ? hz : MIN_FREQ));
-    const y = useAbsolute
-      ? spectra.diffDb.map((v) => Math.abs(v))
-      : Array.from(spectra.diffDb);
-    const name = useAbsolute ? "|Wet − Dry| (dB)" : "Wet − Dry (dB)";
+    const name = useAbsolute ? "|Wet - Dry| (dB)" : "Wet - Dry (dB)";
     return {
       type: "scatter" as const,
       mode: "lines" as const,
       name,
       x: sanitizedFreqs,
-      y,
+      y: displayedDiffValues,
       line: { color: "#ff7b84", width: 2 },
       hovertemplate: "<b>%{x:.0f} Hz</b><br>%{y:.2f} dB<extra></extra>",
     };
-  }, [spectra, useAbsolute]);
+  }, [displayedDiffValues, spectra, useAbsolute]);
 
   useEffect(() => {
     if (!spectra) return;
@@ -474,126 +762,289 @@ export default function FRDifference({
     []
   );
 
+
   return (
     <div className="frpink frdifference">
-      <div className="frpink-controls">
-        <div className="frpink-segment">
-          <span className="frpink-segment__label">Smoothing</span>
-          <div className="frpink-segment__control" role="radiogroup" aria-label="Smoothing amount">
-            {smoothingOptions.map((option) => {
-              const isActive = smoothing === option.value;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  role="radio"
-                  aria-checked={isActive}
-                  className={`frpink-segment__button${isActive ? " is-active" : ""}`}
-                  onClick={() => setSmoothing(option.value)}
-                >
-                  {option.label.replace(" octave", "")}
-                </button>
-              );
-            })}
-          </div>
+      <header className="frdifference-header">
+        <div className="frdifference-heading">
+          <h2 className="frdifference-title">Difference Detection</h2>
+          <p className="frdifference-subtitle">Pick how much change counts as a difference.</p>
+          {showMetrics && (
+            <ul className="frdifference-metrics" role="status" aria-live="polite">
+              {metricsBadges.map((badge) => (
+                <li key={badge.label}>
+                  <span className="frdifference-metrics__label">{badge.label}</span>
+                  <span className="frdifference-metrics__value">{badge.value}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
-        <div className="frpink-segment">
-          <span className="frpink-segment__label">Display</span>
-          <div className="frpink-segment__control" role="group" aria-label="Display mode">
-            <button
-              type="button"
-              className={`frpink-segment__button${useAbsolute ? " is-active" : ""}`}
-              aria-pressed={useAbsolute}
-              onClick={() => setUseAbsolute(true)}
-            >
-              Absolute |Δ|
-            </button>
-            <button
-              type="button"
-              className={`frpink-segment__button${!useAbsolute ? " is-active" : ""}`}
-              aria-pressed={!useAbsolute}
-              onClick={() => setUseAbsolute(false)}
-            >
-              Signed Δ
-            </button>
-          </div>
+        <div className="frdifference-mode" role="group" aria-label="View mode">
+          <button
+            type="button"
+            className={`frdifference-mode__button${showAdvanced ? "" : " is-active"}`}
+            aria-pressed={!showAdvanced}
+            onClick={() => setShowAdvanced(false)}
+          >
+            Simple
+          </button>
+          <button
+            type="button"
+            className={`frdifference-mode__button${showAdvanced ? " is-active" : ""}`}
+            aria-pressed={showAdvanced}
+            onClick={() => setShowAdvanced(true)}
+          >
+            Advanced
+          </button>
         </div>
-        {useAbsolute && (
-          <div className="frpink-segment" style={{ minWidth: 240 }}>
-            <span className="frpink-segment__label">Threshold (dB)</span>
-            <div className="frpink-segment__control" style={{ padding: "0 8px", width: "100%" }}>
-              <input
-                type="range"
-                min={0}
-                max={12}
-                step={0.1}
-                value={thresholdDb}
-                aria-label="Difference threshold in dB"
-                onChange={(e) => setThresholdDb(Number(e.currentTarget.value))}
-                style={{ width: "100%" }}
-              />
-              <div style={{ textAlign: "right", fontSize: 12, opacity: 0.8 }}>{thresholdDb.toFixed(1)} dB</div>
-            </div>
-          </div>
-        )}
-        <div className="frpink-segment frdifference-band-segment">
-          <span className="frpink-segment__label">Solo band</span>
-          <div className="frdifference-band-segment__row">
-            <button
-              type="button"
-              className={`frpink-segment__button${bandSoloEnabled ? " is-active" : ""}`}
-              aria-pressed={bandSoloEnabled}
-              onClick={() => setBandSolo(!bandSoloEnabled)}
-            >
-              {bandSoloEnabled ? "Solo on" : "Solo off"}
-            </button>
-            <div className="frdifference-band-readout" role="text" aria-live="polite">
-              <span>{formatHz(Math.max(MIN_FREQ, bandMinHz))}</span>
-              <span className="frdifference-band-readout__dash">-</span>
-              <span>{formatHz(Math.min(MAX_FREQ, bandMaxHz))}</span>
-            </div>
+      </header>
+
+      <div className="frdifference-grid">
+        <section className="frdifference-threshold-card" aria-labelledby={thresholdLabelId}>
+          <div className="frdifference-section-header">
+            <span className="frdifference-section-label" id={thresholdLabelId}>
+              Threshold (dB)
+            </span>
+            <InfoTip label="Threshold help" tooltipId={thresholdTooltipId}>
+              Treat changes below this dB as no difference.
+            </InfoTip>
           </div>
           <div
-            className={`frdifference-band-slider${bandSoloEnabled ? "" : " is-muted"}`}
-            aria-label={`Solo band frequency range ${bandRangeLabel}`}
+            className="frdifference-threshold-row"
+            aria-describedby={`${thresholdTooltipId} ${thresholdHelperId}`}
           >
-            <div className="frdifference-band-slider__track" />
-            <div
-              className="frdifference-band-slider__selection"
-              style={{ left: `${sliderStart}%`, width: `${sliderSelectionWidth}%` }}
-            />
             <input
               type="range"
-              min={BAND_SLIDER_MIN}
-              max={BAND_SLIDER_MAX}
-              step={1}
-              value={bandMinSlider}
-              onChange={handleBandMinChange}
-              aria-label="Solo band start frequency"
-              className="frdifference-band-slider__input"
+              min={THRESHOLD_MIN}
+              max={THRESHOLD_MAX}
+              step={THRESHOLD_STEP}
+              value={thresholdDb}
+              aria-labelledby={thresholdLabelId}
+              aria-describedby={`${thresholdTooltipId} ${thresholdHelperId}`}
+              onChange={handleThresholdRangeChange}
+              onKeyDown={handleThresholdKeyDown}
             />
             <input
-              type="range"
-              min={BAND_SLIDER_MIN}
-              max={BAND_SLIDER_MAX}
-              step={1}
-              value={bandMaxSlider}
-              onChange={handleBandMaxChange}
-              aria-label="Solo band end frequency"
-              className="frdifference-band-slider__input frdifference-band-slider__input--upper"
+              type="number"
+              min={THRESHOLD_MIN}
+              max={THRESHOLD_MAX}
+              step={THRESHOLD_STEP}
+              value={thresholdDb.toFixed(1)}
+              onChange={handleThresholdNumberChange}
+              aria-label="Threshold in decibels"
+              className="frdifference-field-input"
             />
+            <button
+              type="button"
+              className="frdifference-inline-button"
+              onClick={handleAutoThreshold}
+              disabled={!absoluteDiffValues || absoluteDiffValues.length === 0}
+            >
+              Auto
+            </button>
           </div>
-        </div>
+          <p className="frdifference-helper" id={thresholdHelperId}>
+            Ignores changes below this dB.
+          </p>
+
+          <div className="frdifference-display">
+            <div className="frdifference-section-header">
+              <span className="frdifference-section-label" id={displayLabelId}>
+                Display
+              </span>
+              <InfoTip label="Display help" tooltipId={displayTooltipId}>
+                Absolute mode shows only magnitude. Signed mode shows increase/decrease.
+              </InfoTip>
+            </div>
+            <div
+              className="frdifference-segmented"
+              role="group"
+              aria-labelledby={displayLabelId}
+              aria-describedby={displayTooltipId}
+            >
+              <button
+                type="button"
+                className={`frdifference-segmented__button${useAbsolute ? " is-active" : ""}`}
+                aria-pressed={useAbsolute}
+                onClick={() => setUseAbsolute(true)}
+              >
+                Absolute
+              </button>
+              <button
+                type="button"
+                className={`frdifference-segmented__button${!useAbsolute ? " is-active" : ""}`}
+                aria-pressed={!useAbsolute}
+                onClick={() => setUseAbsolute(false)}
+              >
+                Signed
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section className={`frdifference-accordion${showAdvanced ? " is-open" : ""}`}>
+          <button
+            type="button"
+            className="frdifference-accordion__toggle"
+            aria-expanded={showAdvanced}
+            onClick={() => setShowAdvanced((prev) => !prev)}
+          >
+            <span>Advanced</span>
+            <span className="frdifference-accordion__chevron" aria-hidden="true" />
+          </button>
+          <div
+            className="frdifference-accordion__body"
+            aria-hidden={!showAdvanced}
+          >
+            <div className="frdifference-advanced-grid">
+              <div className="frdifference-advanced-section" role="group" aria-labelledby={smoothingLabelId}>
+                <div className="frdifference-section-header">
+                  <span className="frdifference-section-label" id={smoothingLabelId}>
+                    Smoothing
+                  </span>
+                  <InfoTip label="Smoothing help" tooltipId={smoothingTooltipId} placement="left">
+                    Higher = steadier, less detail.
+                  </InfoTip>
+                </div>
+                <div
+                  className="frdifference-segmented"
+                  role="radiogroup"
+                  aria-labelledby={smoothingLabelId}
+                  aria-describedby={smoothingTooltipId}
+                >
+                  {smoothingOptions.map((option) => {
+                    const isActive = smoothing === option.value;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        role="radio"
+                        aria-checked={isActive}
+                        className={`frdifference-segmented__button${isActive ? " is-active" : ""}`}
+                        onClick={() => setSmoothing(option.value)}
+                      >
+                        {option.label.replace(" octave", "")}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="frdifference-advanced-section frdifference-advanced-section--solo" role="group" aria-labelledby={soloLabelId}>
+                <div className="frdifference-section-header">
+                  <span className="frdifference-section-label" id={soloLabelId}>
+                    Analyze a band
+                  </span>
+                  <InfoTip label="Solo band help" tooltipId={soloTooltipId}>
+                    Limit analysis to a frequency band. Drag the handles or type values.
+                  </InfoTip>
+                  <button
+                    type="button"
+                    className={`frdifference-switch${bandSoloEnabled ? " is-active" : ""}`}
+                    aria-pressed={bandSoloEnabled}
+                    onClick={() => setBandSolo(!bandSoloEnabled)}
+                    aria-label={bandSoloEnabled ? "Disable band analysis" : "Enable band analysis"}
+                  >
+                    {bandSoloEnabled ? "On" : "Off"}
+                  </button>
+                </div>
+                <label className="frdifference-field">
+                  <span>Preset</span>
+                  <select
+                    value={bandPresetState}
+                    onChange={handlePresetChange}
+                    className="frdifference-field-select"
+                    aria-label="Solo band preset"
+                  >
+                    {SOLO_PRESETS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                    <option value="custom">Custom</option>
+                  </select>
+                </label>
+
+                {bandSoloEnabled && (
+                  <div className="frdifference-band-readout" role="text" aria-live="polite">
+                    <span>{formatHz(Math.max(MIN_FREQ, bandMinHz))}</span>
+                    <span className="frdifference-band-readout__dash">-</span>
+                    <span>{formatHz(Math.min(MAX_FREQ, bandMaxHz))}</span>
+                  </div>
+                )}
+
+                {showSoloControls && (
+                  <>
+                    <div
+                      className="frdifference-band-slider"
+                      aria-label={`Solo band frequency range ${bandRangeLabel}`}
+                    >
+                      <div className="frdifference-band-slider__track" />
+                      <div
+                        className="frdifference-band-slider__selection"
+                        style={{ left: `${sliderStart}%`, width: `${sliderSelectionWidth}%` }}
+                      />
+                      <input
+                        type="range"
+                        min={BAND_SLIDER_MIN}
+                        max={BAND_SLIDER_MAX}
+                        step={1}
+                        value={bandMinSlider}
+                        onChange={handleBandMinChange}
+                        onKeyDown={handleBandMinKeyDown}
+                        aria-label="Solo band start frequency"
+                        className="frdifference-band-slider__input"
+                      />
+                      <input
+                        type="range"
+                        min={BAND_SLIDER_MIN}
+                        max={BAND_SLIDER_MAX}
+                        step={1}
+                        value={bandMaxSlider}
+                        onChange={handleBandMaxChange}
+                        onKeyDown={handleBandMaxKeyDown}
+                        aria-label="Solo band end frequency"
+                        className="frdifference-band-slider__input frdifference-band-slider__input--upper"
+                      />
+                    </div>
+                    <div className="frdifference-band-inputs">
+                      <label className="frdifference-field">
+                        <span>Start (Hz)</span>
+                        <input
+                          type="number"
+                          min={MIN_FREQ}
+                          max={MAX_FREQ}
+                          step={0.1}
+                          value={bandMinHz.toFixed(1)}
+                          onChange={handleBandMinInputChange}
+                          aria-label="Solo band start frequency"
+                          className="frdifference-field-input"
+                        />
+                      </label>
+                      <label className="frdifference-field">
+                        <span>End (Hz)</span>
+                        <input
+                          type="number"
+                          min={MIN_FREQ}
+                          max={MAX_FREQ}
+                          step={0.1}
+                          value={bandMaxHz.toFixed(1)}
+                          onChange={handleBandMaxInputChange}
+                          aria-label="Solo band end frequency"
+                          className="frdifference-field-input"
+                        />
+                      </label>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
 
       {error && <div className="frpink-message frpink-message--error">{error}</div>}
-      {!isLoading && !error && !spectra && (
-        <div className="frpink-message">Load a music track and impulse response to inspect the delta.</div>
-      )}
-      {!isLoading && spectra && !spectra.hasIR && (
-        <div className="frpink-message">Load an impulse response to inspect the difference curve.</div>
-      )}
-
       <div className="frpink-plot">
         {isLoading && (
           <div className="frplot-progress" role="status" aria-live="polite">
