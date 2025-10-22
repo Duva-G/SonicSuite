@@ -395,3 +395,5 @@ function createHannWindow(length: number): Float32Array {
   }
   return window;
 }
+
+export { computeResidual as __testComputeResidual };
