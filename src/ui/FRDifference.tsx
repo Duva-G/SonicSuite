@@ -1,4 +1,4 @@
-// WHY: Visualises the delta between dry and convolved playback spectra.
+﻿// WHY: Visualises the delta between dry and convolved playback spectra.
 import {
   useCallback,
   useEffect,
@@ -53,6 +53,8 @@ type Props = {
   bandMaxHz?: number;
   onChangeBandSoloEnabled?: (v: boolean) => void;
   onChangeBandHz?: (min: number, max: number) => void;
+  bandMatchRmsEnabled?: boolean;
+  onChangeBandMatchRmsEnabled?: (v: boolean) => void;
 };
 
 const Plot = createPlotlyComponent(Plotly);
@@ -215,6 +217,8 @@ export default function FRDifference({
   bandMaxHz: bandMaxHzProp,
   onChangeBandSoloEnabled,
   onChangeBandHz,
+  bandMatchRmsEnabled: bandMatchRmsEnabledProp,
+  onChangeBandMatchRmsEnabled,
 }: Props) {
   const [smoothing, setSmoothing] = useState<SmoothingMode>("1/6");
   const [spectra, setSpectra] = useState<DifferenceSpectra | null>(null);
@@ -260,14 +264,21 @@ export default function FRDifference({
   }, [showAdvanced]);
   const [bandSoloState, setBandSoloState] = useState<boolean>(false);
   const [bandRangeState, setBandRangeState] = useState<[number, number]>([MIN_FREQ, MAX_FREQ]);
+  const [bandMatchRmsState, setBandMatchRmsState] = useState<boolean>(true);
   const bandSoloEnabled = typeof bandSoloEnabledProp === "boolean" ? bandSoloEnabledProp : bandSoloState;
   const bandMinHz = typeof bandMinHzProp === "number" ? bandMinHzProp : bandRangeState[0];
   const bandMaxHz = typeof bandMaxHzProp === "number" ? bandMaxHzProp : bandRangeState[1];
+  const bandMatchRmsEnabled =
+    typeof bandMatchRmsEnabledProp === "boolean" ? bandMatchRmsEnabledProp : bandMatchRmsState;
   const customPresetRequestRef = useRef(false);
   const [bandPresetState, setBandPresetState] = useState<string>(() => derivePresetValue(bandMinHz, bandMaxHz));
   const setBandSolo = (v: boolean) => {
     if (onChangeBandSoloEnabled) onChangeBandSoloEnabled(v);
     else setBandSoloState(v);
+  };
+  const setBandMatchRms = (v: boolean) => {
+    if (onChangeBandMatchRmsEnabled) onChangeBandMatchRmsEnabled(v);
+    else setBandMatchRmsState(v);
   };
   const setBandRange = (min: number, max: number) => {
     const [nextMin, nextMax] = clampBandRange(min, max);
@@ -290,10 +301,12 @@ export default function FRDifference({
   const smoothingTooltipId = useId();
   const displayTooltipId = useId();
   const soloTooltipId = useId();
+  const matchRmsTooltipId = useId();
   const thresholdLabelId = useId();
   const smoothingLabelId = useId();
   const displayLabelId = useId();
   const soloLabelId = useId();
+  const matchRmsLabelId = useId();
   const thresholdHelperId = useId();
   const derivedPreset = useMemo(
     () => derivePresetValue(bandMinHz, bandMaxHz),
@@ -764,22 +777,24 @@ export default function FRDifference({
 
 
   return (
-    <div className="frpink frdifference">
-      <header className="frdifference-header">
-        <div className="frdifference-heading">
-          <h2 className="frdifference-title">Difference Detection</h2>
-          <p className="frdifference-subtitle">Pick how much change counts as a difference.</p>
-          {showMetrics && (
-            <ul className="frdifference-metrics" role="status" aria-live="polite">
-              {metricsBadges.map((badge) => (
-                <li key={badge.label}>
-                  <span className="frdifference-metrics__label">{badge.label}</span>
-                  <span className="frdifference-metrics__value">{badge.value}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+    <div className={`frpink frdifference${compact ? " frdifference--compact" : ""}`}>
+      <header className={`frdifference-header${compact ? " frdifference-header--compact" : ""}`}>
+        {!compact && (
+          <div className="frdifference-heading">
+            <h2 className="frdifference-title">Difference Detection</h2>
+            <p className="frdifference-subtitle">Pick how much change counts as a difference.</p>
+            {showMetrics && (
+              <ul className="frdifference-metrics" role="status" aria-live="polite">
+                {metricsBadges.map((badge) => (
+                  <li key={badge.label}>
+                    <span className="frdifference-metrics__label">{badge.label}</span>
+                    <span className="frdifference-metrics__value">{badge.value}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
         <div className="frdifference-mode" role="group" aria-label="View mode">
           <button
             type="button"
@@ -965,6 +980,26 @@ export default function FRDifference({
                     <option value="custom">Custom</option>
                   </select>
                 </label>
+                <div
+                  className="frdifference-matchrms-row"
+                  role="group"
+                  aria-labelledby={matchRmsLabelId}
+                  aria-describedby={matchRmsTooltipId}
+                >
+                  <span id={matchRmsLabelId}>Match RMS in band</span>
+                  <InfoTip label="Match RMS help" tooltipId={matchRmsTooltipId}>
+                    Loudness-match within the selected band for fair A/B.
+                  </InfoTip>
+                  <button
+                    type="button"
+                    className={`frdifference-switch${bandMatchRmsEnabled ? " is-active" : ""}`}
+                    aria-pressed={bandMatchRmsEnabled}
+                    onClick={() => setBandMatchRms(!bandMatchRmsEnabled)}
+                    aria-label={bandMatchRmsEnabled ? "Disable band RMS matching" : "Enable band RMS matching"}
+                  >
+                    {bandMatchRmsEnabled ? "On" : "Off"}
+                  </button>
+                </div>
 
                 {bandSoloEnabled && (
                   <div className="frdifference-band-readout" role="text" aria-live="polite">
