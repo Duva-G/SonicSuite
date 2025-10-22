@@ -3,7 +3,6 @@ import type { ChangeEvent, DragEvent } from "react";
 import FullscreenModal from "./FullscreenModal";
 import FRMusicPink from "./FRMusicPink";
 import WaveformPlot from "./WaveformPlot";
-import InView from "./InView";
 import MetaChips, { type MetaChip } from "./MetaChips";
 
 type Props = {
@@ -50,16 +49,14 @@ export default function FileInputs({
   irCMetadata,
   sampleRate,
 }: Props) {
-  const [showMusicWave, setShowMusicWave] = useState(false);
-  const [showMusicPink, setShowMusicPink] = useState(false);
   const [showMusicFull, setShowMusicFull] = useState(false);
-  const [showIrWave, setShowIrWave] = useState(false);
+  const [showMusicPinkModal, setShowMusicPinkModal] = useState(false);
   const [showIrFull, setShowIrFull] = useState(false);
-  const [showIrCWave, setShowIrCWave] = useState(false);
   const [showIrCFull, setShowIrCFull] = useState(false);
   const [isMusicDropping, setIsMusicDropping] = useState(false);
   const [isIrDropping, setIsIrDropping] = useState(false);
   const [isIrCDropping, setIsIrCDropping] = useState(false);
+  const [isOptionalIrOpen, setOptionalIrOpen] = useState<boolean>(() => Boolean(irCBuffer));
   const musicInputRef = useRef<HTMLInputElement | null>(null);
   const irInputRef = useRef<HTMLInputElement | null>(null);
   const irCInputRef = useRef<HTMLInputElement | null>(null);
@@ -80,33 +77,37 @@ export default function FileInputs({
     [irCMeta, irCMetadata, sampleRate]
   );
 
+  const optionalIrVisible = isOptionalIrOpen || Boolean(irCBuffer) || isIrCDropping;
+  const optionalToggleText = irCBuffer
+    ? "IR B active"
+    : optionalIrVisible
+    ? "Hide IR B slot"
+    : "Add IR B slot";
+
   const irSampleRateWarning = useMemo(() => getSampleRateWarning(irMeta, sampleRate), [irMeta, sampleRate]);
   const irCSampleRateWarning = useMemo(() => getSampleRateWarning(irCMeta, sampleRate), [irCMeta, sampleRate]);
 
   useEffect(() => {
-    if (musicBuffer) {
-      setShowMusicWave(true);
-    } else {
-      setShowMusicWave(false);
-      setShowMusicPink(false);
+    if (irCBuffer && !isOptionalIrOpen) {
+      setOptionalIrOpen(true);
+    }
+  }, [irCBuffer, isOptionalIrOpen]);
+
+  useEffect(() => {
+    if (!musicBuffer) {
       setShowMusicFull(false);
+      setShowMusicPinkModal(false);
     }
   }, [musicBuffer]);
 
   useEffect(() => {
-    if (irBuffer) {
-      setShowIrWave(true);
-    } else {
-      setShowIrWave(false);
+    if (!irBuffer) {
       setShowIrFull(false);
     }
   }, [irBuffer]);
 
   useEffect(() => {
-    if (irCBuffer) {
-      setShowIrCWave(true);
-    } else {
-      setShowIrCWave(false);
+    if (!irCBuffer) {
       setShowIrCFull(false);
     }
   }, [irCBuffer]);
@@ -159,13 +160,19 @@ export default function FileInputs({
     });
 
   const handleIrCDragEnter = (event: DragEvent<HTMLLabelElement>) =>
-    handleDragEnter(event, setIsIrCDropping);
+    handleDragEnter(event, (next) => {
+      if (next) {
+        setOptionalIrOpen(true);
+      }
+      setIsIrCDropping(next);
+    });
   const handleIrCDragOver = (event: DragEvent<HTMLLabelElement>) =>
     handleDragOver(event, setIsIrCDropping);
   const handleIrCDragLeave = (event: DragEvent<HTMLLabelElement>) =>
     handleDragLeave(event, setIsIrCDropping);
   const handleIrCDrop = (event: DragEvent<HTMLLabelElement>) =>
     handleDrop(event, setIsIrCDropping, (file) => {
+      setOptionalIrOpen(true);
       if (irCInputRef.current) {
         irCInputRef.current.value = "";
       }
@@ -179,26 +186,41 @@ export default function FileInputs({
           <h2 className="panel-title">Source files</h2>
           <p className="panel-desc">Load a dry mix and an impulse response to start sculpting.</p>
         </div>
-        <div className="panel-help" ref={tipsRef}>
+        <div className="file-panel__actions">
           <button
             type="button"
-            className="panel-help__button"
-            aria-label="Import tips"
-            onClick={() => setShowTips((v) => !v)}
+            className="file-panel__toggle"
+            aria-pressed={optionalIrVisible}
+            aria-expanded={optionalIrVisible}
+            onClick={() => {
+              if (irCBuffer) return;
+              setOptionalIrOpen((v) => !v);
+            }}
+            disabled={Boolean(irCBuffer) && optionalIrVisible}
           >
-            M
+            {optionalToggleText}
           </button>
-          {showTips && (
-            <div className="panel-help__popover" role="dialog" aria-label="Import tips">
-              <h3 className="panel-help__title">Import tips</h3>
-              <p className="panel-help__text">
-                <strong>Music:</strong> WAV/AIFF, 44.1-96 kHz, 24-bit+. Avoid MP3/AAC.
-              </p>
-              <p className="panel-help__text">
-                <strong>Impulse Response:</strong> WAV/AIFF at the same sample rate as the session.
-              </p>
-            </div>
-          )}
+          <div className="panel-help" ref={tipsRef}>
+            <button
+              type="button"
+              className="panel-help__button"
+              aria-label="Import tips"
+              onClick={() => setShowTips((v) => !v)}
+            >
+              ?
+            </button>
+            {showTips && (
+              <div className="panel-help__popover" role="dialog" aria-label="Import tips">
+                <h3 className="panel-help__title">Import tips</h3>
+                <p className="panel-help__text">
+                  <strong>Music:</strong> WAV/AIFF, 44.1-96 kHz, 24-bit+. Avoid MP3/AAC.
+                </p>
+                <p className="panel-help__text">
+                  <strong>Impulse Response:</strong> WAV/AIFF at the same sample rate as the session.
+                </p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
       <div className="file-card-grid">
@@ -214,7 +236,7 @@ export default function FileInputs({
               M
             </div>
             <div className="file-card__copy">
-              <span className="file-card__title">Music WAV</span>
+              <span className="file-card__title">Music (O)</span>
               <span className="file-card__subtitle">Upload the track you want to convolve.</span>
             </div>
             <span className="file-card__action">Choose file</span>
@@ -236,64 +258,21 @@ export default function FileInputs({
                 </span>
                 <MetaChips chips={musicChips} aria-label="Music file metadata" />
               </div>
-              <div className="waveform-section">
-                <div className="waveform-header">
-                  <div className="waveform-title">
-                    <span className="waveform-title__name" title={musicName || "Music waveform"}>
-                      {musicName || "Music waveform"}
-                    </span>
-                    {musicMeta && <span className="waveform-title__meta">{musicMeta.durationLabel}</span>}
-                  </div>
-                  <div className="waveform-toolbar" role="toolbar" aria-label="Music waveform controls">
-                    <div className="segmented-control" role="group" aria-label="Music view toggles">
-                      <button
-                        type="button"
-                        className="segmented-control__button"
-                        aria-pressed={showMusicWave}
-                        onClick={() => setShowMusicWave((v) => !v)}
-                      >
-                        Waveform
-                      </button>
-                      <button
-                        type="button"
-                        className="segmented-control__button"
-                        aria-pressed={showMusicPink}
-                        onClick={() => setShowMusicPink((v) => !v)}
-                      >
-                        Spectrum vs Pink
-                      </button>
-                    </div>
-                    <button
-                      type="button"
-                      className="segmented-control__button segmented-control__button--action"
-                      onClick={() => setShowMusicFull(true)}
-                    >
-                      Full screen
-                    </button>
-                  </div>
-                </div>
-                {showMusicWave && (
-                  <InView
-                    className="waveform-plot"
-                    fallback={<PlotSkeleton label="Loading waveform..." />}
-                    rootMargin="200px"
-                  >
-                    <WaveformPlot
-                      buffer={musicBuffer}
-                      color="#5ac8fa"
-                      title={musicName || "Music"}
-                    />
-                  </InView>
-                )}
-                {showMusicPink && (
-                  <InView
-                    className="waveform-plot"
-                    fallback={<PlotSkeleton label="Preparing comparison..." />}
-                    rootMargin="200px"
-                  >
-                    <FRMusicPink musicBuffer={musicBuffer} sampleRate={sampleRate} />
-                  </InView>
-                )}
+              <div className="file-actions" role="group" aria-label="Music analysis options">
+                <button
+                  type="button"
+                  className="file-actions__button"
+                  onClick={() => setShowMusicFull(true)}
+                >
+                  Show waveform
+                </button>
+                <button
+                  type="button"
+                  className="file-actions__button"
+                  onClick={() => setShowMusicPinkModal(true)}
+                >
+                  Spectrum vs Pink
+                </button>
               </div>
             </>
           )}
@@ -310,7 +289,7 @@ export default function FileInputs({
               IR
             </div>
             <div className="file-card__copy">
-              <span className="file-card__title">Impulse response WAV</span>
+              <span className="file-card__title">Impulse Response (A)</span>
               <span className="file-card__subtitle">Choose the acoustic fingerprint to apply.</span>
             </div>
             <span className="file-card__action">Choose file</span>
@@ -337,140 +316,89 @@ export default function FileInputs({
                   </div>
                 )}
               </div>
-              <div className="waveform-section">
-                <div className="waveform-header">
-                  <div className="waveform-title">
-                    <span className="waveform-title__name" title={irName || "Impulse response"}>
-                      {irName || "Impulse response"}
-                    </span>
-                    {irMeta && <span className="waveform-title__meta">{irMeta.durationLabel}</span>}
-                  </div>
-                  <div className="waveform-toolbar" role="toolbar" aria-label="Impulse response controls">
-                    <div className="segmented-control" role="group" aria-label="Impulse response view toggles">
-                      <button
-                        type="button"
-                        className="segmented-control__button"
-                        aria-pressed={showIrWave}
-                        onClick={() => setShowIrWave((v) => !v)}
-                      >
-                        Waveform
-                      </button>
-                    </div>
-                    <button
-                      type="button"
-                      className="segmented-control__button segmented-control__button--action"
-                      onClick={() => setShowIrFull(true)}
-                    >
-                      Full screen
-                    </button>
-                  </div>
-                </div>
-                {showIrWave && (
-                  <InView
-                    className="waveform-plot"
-                    fallback={<PlotSkeleton label="Loading waveform..." />}
-                    rootMargin="200px"
-                  >
-                    <WaveformPlot
-                      buffer={irBuffer}
-                      color="#ff9f0a"
-                      title={irName || "Impulse response"}
-                    />
-                  </InView>
-                )}
+              <div className="file-actions" role="group" aria-label="Impulse response actions">
+                <button
+                  type="button"
+                  className="file-actions__button"
+                  onClick={() => setShowIrFull(true)}
+                >
+                  Show waveform
+                </button>
               </div>
             </>
           )}
         </div>
-        <div className="file-card-stack">
-          <label
-            className={`file-card${isIrCDropping ? " file-card--dropping" : ""}`}
-            onDragEnter={handleIrCDragEnter}
-            onDragOver={handleIrCDragOver}
-            onDragLeave={handleIrCDragLeave}
-            onDrop={handleIrCDrop}
-          >
-            <div className="file-card__icon" aria-hidden="true">
-              IR
-            </div>
-            <div className="file-card__copy">
-              <span className="file-card__title">Impulse response C (optional)</span>
-              <span className="file-card__subtitle">Load a second IR to compare.</span>
-            </div>
-            <span className="file-card__action">Choose file</span>
-            {isIrCDropping && <div className="file-card__drop-indicator">Drop to load</div>}
-            <input
-              ref={irCInputRef}
-              className="file-card__input"
-              type="file"
-              accept=".wav,audio/wav"
-              onChange={onPickIRC}
-            />
-          </label>
-          {irCBuffer && (
-            <>
-              <div className="file-status" aria-live="polite">
-                <span className="file-status__label">Selected file</span>
-                <span className="file-status__value" title={irCName || "Impulse response C"}>
-                  {irCName || "Impulse response C"}
-                </span>
-                <MetaChips chips={irCChips} aria-label="Impulse response C metadata" />
-                {irCSampleRateWarning && (
-                  <div className="file-warning" role="status">
-                    {irCSampleRateWarning}
-                  </div>
-                )}
+        {optionalIrVisible && (
+          <div className="file-card-stack file-card-stack--optional">
+            <label
+              className={`file-card${
+                isIrCDropping ? " file-card--dropping" : ""
+              }${irCBuffer ? " file-card--active" : optionalIrVisible ? " file-card--soft" : ""}`}
+              onDragEnter={handleIrCDragEnter}
+              onDragOver={handleIrCDragOver}
+              onDragLeave={handleIrCDragLeave}
+              onDrop={handleIrCDrop}
+            >
+              <div className="file-card__icon" aria-hidden="true">
+                IR
               </div>
-              <div className="waveform-section">
-                <div className="waveform-header">
-                  <div className="waveform-title">
-                    <span className="waveform-title__name" title={irCName || "Impulse response C"}>
-                      {irCName || "Impulse response C"}
-                    </span>
-                    {irCMeta && <span className="waveform-title__meta">{irCMeta.durationLabel}</span>}
-                  </div>
-                  <div className="waveform-toolbar" role="toolbar" aria-label="Impulse response C controls">
-                    <div className="segmented-control" role="group" aria-label="Impulse response C view toggles">
-                      <button
-                        type="button"
-                        className="segmented-control__button"
-                        aria-pressed={showIrCWave}
-                        onClick={() => setShowIrCWave((v) => !v)}
-                      >
-                        Waveform
-                      </button>
+              <div className="file-card__copy">
+                <span className="file-card__title">Impulse Response (B)</span>
+                <span className="file-card__subtitle">Load a second IR to compare.</span>
+              </div>
+              <span className="file-card__action">Choose file</span>
+              {isIrCDropping && <div className="file-card__drop-indicator">Drop to load</div>}
+              <input
+                ref={irCInputRef}
+                className="file-card__input"
+                type="file"
+                accept=".wav,audio/wav"
+                onChange={onPickIRC}
+              />
+            </label>
+            {irCBuffer && (
+              <>
+                <div className="file-status" aria-live="polite">
+                  <span className="file-status__label">Selected file</span>
+                  <span className="file-status__value" title={irCName || "Impulse response B"}>
+                    {irCName || "Impulse response B"}
+                  </span>
+                  <MetaChips chips={irCChips} aria-label="Impulse response B metadata" />
+                  {irCSampleRateWarning && (
+                    <div className="file-warning" role="status">
+                      {irCSampleRateWarning}
                     </div>
-                    <button
-                      type="button"
-                      className="segmented-control__button segmented-control__button--action"
-                      onClick={() => setShowIrCFull(true)}
-                    >
-                      Full screen
-                    </button>
-                  </div>
+                  )}
                 </div>
-                {showIrCWave && (
-                  <InView
-                    className="waveform-plot"
-                    fallback={<PlotSkeleton label="Loading waveform..." />}
-                    rootMargin="200px"
+                <div className="file-actions" role="group" aria-label="Impulse response B actions">
+                  <button
+                    type="button"
+                    className="file-actions__button"
+                    onClick={() => setShowIrCFull(true)}
                   >
-                    <WaveformPlot
-                      buffer={irCBuffer}
-                      color="#ff453a"
-                      title={irCName || "Impulse response C"}
-                    />
-                  </InView>
-                )}
-              </div>
-            </>
-          )}
-        </div>
+                    Show waveform
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
       <FullscreenModal isOpen={showMusicFull} onClose={() => setShowMusicFull(false)} title={musicName || "Music"}>
         {musicBuffer && (
           <div className="fullscreen-modal__plot">
             <WaveformPlot buffer={musicBuffer} color="#5ac8fa" title={musicName || "Music"} />
+          </div>
+        )}
+      </FullscreenModal>
+      <FullscreenModal
+        isOpen={showMusicPinkModal}
+        onClose={() => setShowMusicPinkModal(false)}
+        title={musicName ? `${musicName} - Spectrum vs Pink` : "Spectrum vs Pink"}
+      >
+        {musicBuffer && (
+          <div className="fullscreen-modal__plot">
+            <FRMusicPink musicBuffer={musicBuffer} sampleRate={sampleRate} />
           </div>
         )}
       </FullscreenModal>
@@ -488,23 +416,15 @@ export default function FileInputs({
       <FullscreenModal
         isOpen={showIrCFull}
         onClose={() => setShowIrCFull(false)}
-        title={irCName || "Impulse response C"}
+        title={irCName || "Impulse response B"}
       >
         {irCBuffer && (
           <div className="fullscreen-modal__plot">
-            <WaveformPlot buffer={irCBuffer} color="#ff453a" title={irCName || "Impulse response C"} />
+            <WaveformPlot buffer={irCBuffer} color="#ff453a" title={irCName || "Impulse response B"} />
           </div>
         )}
       </FullscreenModal>
     </section>
-  );
-}
-
-function PlotSkeleton({ label }: { label: string }) {
-  return (
-    <div className="plot-skeleton" role="status" aria-live="polite">
-      {label}
-    </div>
   );
 }
 
