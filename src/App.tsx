@@ -1,15 +1,29 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import FileInputs from "./ui/FileInputs";
 import Transport from "./ui/Transport";
 import ModeBar from "./ui/ModeBar";
 import type { Mode } from "./ui/ModeBar";
 import ExportBar from "./ui/ExportBar";
-import FRPink from "./ui/FRPink";
 import FRPlayback from "./ui/FRPlayback";
 import FRDifference from "./ui/FRDifference";
 import IRProcessingPanel from "./ui/IRProcessingPanel";
 import PasswordGate from "./ui/PasswordGate";
 import { createModuleWorker } from "./utils/workerSupport";
+import BandAuditionRouter, { type AuditionPath, type BasePath } from "./audio/BandAuditionRouter";
+import type { BandSettings } from "./audio/bandPassFactory";
+import type { LatencySecondsMap } from "./audio/LatencyCompensator";
+import { computeBandTrims, type TrimResult } from "./audio/BandLevelMatcher";
+import { useAbcxController, type BlindTestMode, hashSeed } from "./audio/ABCXController";
+import BlindTestPanel from "./ui/BlindTestPanel";
+import {
+  BAND_PRESETS,
+  BAND_RANGE_LIMITS,
+  clampBandRange,
+  derivePresetValue,
+  formatHz,
+  freqToSliderValue,
+  sliderValueToFreq,
+} from "./ui/bandRangeUtils";
 import "./App.css";
 import harbethLogo from "./assets/harbeth-logo.svg";
 
@@ -20,6 +34,13 @@ type ResidualBasis = {
   offset: number;
   gains: number[];
   fallbackResidual: AudioBuffer;
+};
+
+type PathMetric = {
+  trimLinear: number;
+  trimDb: number | null;
+  latencySeconds: number;
+  bandMultiplier?: number;
 };
 
 type ResidualWorkerSuccess = {
@@ -41,6 +62,32 @@ type ResidualWorkerMessage = ResidualWorkerSuccess | ResidualWorkerFailure;
 
 const DEFAULT_SOLO_BAND: [number, number] = [20, 20000];
 
+type DifferencePath = "DeltaAB" | "DeltaAC" | "DeltaBC";
+const DIFFERENCE_PRIORITY: DifferencePath[] = ["DeltaAB", "DeltaAC", "DeltaBC"];
+
+const {
+  MIN_FREQ: PLAYBACK_BAND_MIN_HZ,
+  MAX_FREQ: PLAYBACK_BAND_MAX_HZ,
+  BAND_SLIDER_MIN: PLAYBACK_BAND_SLIDER_MIN,
+  BAND_SLIDER_MAX: PLAYBACK_BAND_SLIDER_MAX,
+} = BAND_RANGE_LIMITS;
+
+const FULL_PLAYBACK_BAND: [number, number] = [PLAYBACK_BAND_MIN_HZ, PLAYBACK_BAND_MAX_HZ];
+
+const MODE_BASE_PATH: Record<Exclude<Mode, "difference">, AuditionPath> = {
+  original: "A",
+  convolved: "B",
+};
+
+const FULL_RANGE_TOLERANCE_HZ = 0.5;
+
+function isFullRangePair(minHz: number, maxHz: number): boolean {
+  return (
+    Math.abs(minHz - PLAYBACK_BAND_MIN_HZ) <= FULL_RANGE_TOLERANCE_HZ &&
+    Math.abs(maxHz - PLAYBACK_BAND_MAX_HZ) <= FULL_RANGE_TOLERANCE_HZ
+  );
+}
+
 function SonicSuiteApp() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const srcRef = useRef<AudioBufferSourceNode | null>(null);
@@ -48,10 +95,19 @@ function SonicSuiteApp() {
   const gainRef = useRef<GainNode | null>(null);
   const convolverLatencyRef = useRef(0);
   const matchGainRef = useRef<GainNode | null>(null);
+  const convCRef = useRef<ConvolverNode | null>(null);
+  const matchGainCRef = useRef<GainNode | null>(null);
+  const convolverLatencyCRef = useRef(0);
+  const auditionRouterRef = useRef<BandAuditionRouter | null>(null);
+  const bandPathRef = useRef<AuditionPath>("A");
+  const bandPathOverrideRef = useRef<AuditionPath | null>(null);
+  const previousPlaybackBandRef = useRef<[number, number]>([...FULL_PLAYBACK_BAND]);
 
   const musicBufRef = useRef<AudioBuffer | null>(null);
   const irOriginalRef = useRef<AudioBuffer | null>(null);
   const irBufRef = useRef<AudioBuffer | null>(null);
+  const irCOriginalRef = useRef<AudioBuffer | null>(null);
+  const irCBufRef = useRef<AudioBuffer | null>(null);
   const residualBufRef = useRef<AudioBuffer | null>(null);
   const residualBasisRef = useRef<ResidualBasis | null>(null);
   const residualWorkerRef = useRef<Worker | null>(null);
@@ -59,6 +115,7 @@ function SonicSuiteApp() {
   const residualPendingRef = useRef(
     new Map<number, { resolve: (buffer: AudioBuffer) => void; reject: (error: Error) => void }>(),
   );
+  const inlineDiffHelpRef = useRef<HTMLDivElement | null>(null);
   const makeGraphRef = useRef<((at: number, playbackMode?: Mode) => void) | null>(null);
 
   const startTimeRef = useRef(0);
@@ -70,6 +127,9 @@ function SonicSuiteApp() {
   const [originalVol, setOriginalVol] = useState<number>(1.0);
   const [convolvedVol, setConvolvedVol] = useState<number>(1.0);
   const [differenceVol, setDifferenceVol] = useState<number>(1.0);
+  const [differencePath, setDifferencePath] = useState<DifferencePath>("DeltaAB");
+  const [frozenDifferencePath, setFrozenDifferencePath] = useState<DifferencePath | null>(null);
+  const [playbackBandHz, setPlaybackBandHz] = useState<[number, number]>(() => [...FULL_PLAYBACK_BAND]);
   const [differenceThresholdDb, setDifferenceThresholdDb] = useState<number>(0);
   const [pendingDifferenceThresholdDb, setPendingDifferenceThresholdDb] = useState<number>(0);
   const [differenceAbsMode, setDifferenceAbsMode] = useState<boolean>(true);
@@ -77,7 +137,11 @@ function SonicSuiteApp() {
   const [pendingSoloBandEnabled, setPendingSoloBandEnabled] = useState<boolean>(false);
   const [soloBandHz, setSoloBandHz] = useState<[number, number]>(() => [...DEFAULT_SOLO_BAND]);
   const [pendingSoloBandHz, setPendingSoloBandHz] = useState<[number, number]>(() => [...DEFAULT_SOLO_BAND]);
+  const [bandMatchRmsEnabled, setBandMatchRmsEnabled] = useState<boolean>(true);
+  const [pendingBandMatchRmsEnabled, setPendingBandMatchRmsEnabled] = useState<boolean>(true);
   const [soloBandMinHz, soloBandMaxHz] = soloBandHz;
+  const playbackBandMinHz = playbackBandHz[0];
+  const playbackBandMaxHz = playbackBandHz[1];
   const [isResidualComputing, setResidualComputing] = useState<boolean>(false);
   const [latencySamples, setLatencySamples] = useState<number>(0);
   const [kPerCh, setKPerCh] = useState<number[] | null>(null);
@@ -85,16 +149,76 @@ function SonicSuiteApp() {
   const [status, setStatus] = useState<string>("Load a music WAV and an IR WAV.");
   const [downloadUrl, setDownloadUrl] = useState<string>("");
   const [differenceDownloadUrl, setDifferenceDownloadUrl] = useState<string>("");
-  const [view, setView] = useState<"playback" | "playback-fr" | "frdiff" | "frpink">("playback");
+  const [isInlineDiffHelpOpen, setInlineDiffHelpOpen] = useState(false);
+  const [view, setView] = useState<"playback" | "playback-fr" | "frdiff">("playback");
   const [sessionSampleRate, setSessionSampleRate] = useState<number>(44100);
   const [musicBuffer, setMusicBuffer] = useState<AudioBuffer | null>(null);
   const [irOriginal, setIrOriginal] = useState<AudioBuffer | null>(null);
   const [irBuffer, setIrBuffer] = useState<AudioBuffer | null>(null);
   const [convolvedMatchGain, setConvolvedMatchGain] = useState<number>(1);
   const [isConvolvedGainMatched, setConvolvedGainMatched] = useState(false);
+  const [irCOriginal, setIrCOriginal] = useState<AudioBuffer | null>(null);
+  const [irCBuffer, setIrCBuffer] = useState<AudioBuffer | null>(null);
+  const [convolvedCMatchGain, setConvolvedCMatchGain] = useState<number>(1);
+  const [, setConvolvedCGainMatched] = useState(false);
+  const [bandCVol, setBandCVol] = useState<number>(1);
+  const abcx = useAbcxController();
+  const [blindTestMode, setBlindTestMode] = useState<BlindTestMode | "off">("off");
+  const [blindTestSeed, setBlindTestSeed] = useState<string>(() => Date.now().toString(36));
   const [isMatchingRms, setMatchingRms] = useState(false);
   const [musicName, setMusicName] = useState<string>("");
   const [irName, setIrName] = useState<string>("");
+  const [irCName, setIrCName] = useState<string>("");
+  const inlineDiffHelpPopoverId = "inline-diff-help-popover";
+
+  useEffect(() => {
+    if (mode !== "difference") {
+      setInlineDiffHelpOpen(false);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    if (!isInlineDiffHelpOpen) return;
+    const handleDocumentClick = (event: globalThis.MouseEvent) => {
+      if (!inlineDiffHelpRef.current) return;
+      const target = event.target as Node | null;
+      if (target && !inlineDiffHelpRef.current.contains(target)) {
+        setInlineDiffHelpOpen(false);
+      }
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setInlineDiffHelpOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleDocumentClick);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleDocumentClick);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isInlineDiffHelpOpen]);
+  const {
+    configure: configureBlindTest,
+    reset: resetBlindController,
+    reveal: revealBlindChoice,
+    makeChoice: makeBlindChoice,
+    nextTrial: nextBlindTrial,
+    trials: blindTrials,
+    stats: blindStats,
+    current: blindCurrent,
+  } = abcx;
+
+  const blindConfigRef = useRef<{
+    band: BandSettings;
+    trims: Partial<Record<BasePath, number>>;
+    latencies: Partial<Record<BasePath, number>>;
+    mode: BlindTestMode;
+    seed: string;
+  } | null>(null);
+
+  const [bandTrimResult, setBandTrimResult] = useState<TrimResult | null>(null);
+  const [isBandTrimComputing, setBandTrimComputing] = useState(false);
 
   const getModeDuration = useCallback((playbackMode: Mode = mode): number => {
     const musicDuration = musicBufRef.current?.duration ?? 0;
@@ -104,6 +228,16 @@ function SonicSuiteApp() {
     }
     return musicDuration;
   }, [mode]);
+
+  const resolveModePath = useCallback(
+    (playbackMode: Mode): AuditionPath => {
+      if (playbackMode === "difference") {
+        return differencePath;
+      }
+      return MODE_BASE_PATH[playbackMode];
+    },
+    [differencePath],
+  );
 
   const transportDuration = getModeDuration(mode);
   const clampedPlaybackPosition = Math.min(playbackPosition, transportDuration || 0);
@@ -117,7 +251,130 @@ function SonicSuiteApp() {
   const bandEnabledDirty = pendingSoloBandEnabled !== soloBandEnabled;
   const bandRangeDirty =
     Math.abs(pendingSoloBandHz[0] - soloBandHz[0]) > 1e-6 || Math.abs(pendingSoloBandHz[1] - soloBandHz[1]) > 1e-6;
-  const differenceControlsDirty = thresholdDirty || bandEnabledDirty || bandRangeDirty;
+  const bandMatchRmsDirty = pendingBandMatchRmsEnabled !== bandMatchRmsEnabled;
+  const differenceControlsDirty = thresholdDirty || bandEnabledDirty || bandRangeDirty || bandMatchRmsDirty;
+  const isFullRangeBand = isFullRangePair(playbackBandMinHz, playbackBandMaxHz);
+  const isBandActive = !isFullRangeBand;
+  const isBandFrozen = blindConfigRef.current != null;
+  const isDifferenceFrozen = frozenDifferencePath != null;
+  const bandScopeEngaged = isBandActive || isBandFrozen;
+  const playbackPresetValue = useMemo(
+    () => derivePresetValue(playbackBandMinHz, playbackBandMaxHz, BAND_PRESETS),
+    [playbackBandMinHz, playbackBandMaxHz],
+  );
+  const playbackBandLabel = `${formatHz(playbackBandMinHz)} - ${formatHz(playbackBandMaxHz)}`;
+  const blindPanelBandLabel = isBandFrozen ? `${playbackBandLabel} (frozen)` : playbackBandLabel;
+  const playbackBandMinSlider = useMemo(() => freqToSliderValue(playbackBandMinHz), [playbackBandMinHz]);
+  const playbackBandMaxSlider = useMemo(() => freqToSliderValue(playbackBandMaxHz), [playbackBandMaxHz]);
+  const playbackSliderSpan = PLAYBACK_BAND_SLIDER_MAX - PLAYBACK_BAND_SLIDER_MIN || 1;
+  const clampSliderPercent = (value: number) => Math.min(100, Math.max(0, value));
+  const playbackSliderStart = clampSliderPercent(
+    ((Math.min(playbackBandMinSlider, playbackBandMaxSlider) - PLAYBACK_BAND_SLIDER_MIN) / playbackSliderSpan) * 100,
+  );
+  const playbackSliderEnd = clampSliderPercent(
+    ((Math.max(playbackBandMinSlider, playbackBandMaxSlider) - PLAYBACK_BAND_SLIDER_MIN) / playbackSliderSpan) * 100,
+  );
+  const playbackSliderSelectionWidth = Math.max(1, playbackSliderEnd - playbackSliderStart);
+  const hasIrB = Boolean(irBuffer);
+  const hasIrC = Boolean(irCBuffer);
+  const canDeltaAB = hasIrB;
+  const canDeltaAC = hasIrC;
+  const canDeltaBC = hasIrB && hasIrC;
+  const availableDifferencePaths = useMemo(() => {
+    const paths: DifferencePath[] = [];
+    if (canDeltaAB) paths.push("DeltaAB");
+    if (canDeltaAC) paths.push("DeltaAC");
+    if (canDeltaBC) paths.push("DeltaBC");
+    return paths;
+  }, [canDeltaAB, canDeltaAC, canDeltaBC]);
+
+  useEffect(() => {
+    if (availableDifferencePaths.length === 0) return;
+    if (!availableDifferencePaths.includes(differencePath)) {
+      const fallback = availableDifferencePaths[0];
+      setDifferencePath(fallback);
+      setFrozenDifferencePath((prev) => (prev ? fallback : prev));
+    }
+  }, [availableDifferencePaths, differencePath]);
+
+  const differenceOptions = useMemo(
+    () => [
+      { value: "DeltaAB" as DifferencePath, label: "B - A", shortcut: "5", disabled: !canDeltaAB },
+      { value: "DeltaAC" as DifferencePath, label: "C - A", shortcut: "6", disabled: !canDeltaAC },
+      { value: "DeltaBC" as DifferencePath, label: "B - C", shortcut: "7", disabled: !canDeltaBC },
+    ],
+    [canDeltaAB, canDeltaAC, canDeltaBC],
+  );
+
+  const handleDifferencePathChange = useCallback(
+    (next: DifferencePath) => {
+      if (isDifferenceFrozen) return;
+      if (!availableDifferencePaths.includes(next)) return;
+      if (differencePath === next) return;
+      bandPathOverrideRef.current = null;
+      setDifferencePath(next);
+    },
+    [availableDifferencePaths, differencePath, isDifferenceFrozen],
+  );
+
+  const availableBlindModes = useMemo(
+    () => ({
+      ABX: hasIrB,
+      ACX: hasIrC,
+      BCX: hasIrB && hasIrC,
+      ABCX: hasIrB && hasIrC,
+    }),
+    [hasIrB, hasIrC],
+  );
+
+  const blindLastEntry = blindTrials.length > 0 ? blindTrials[blindTrials.length - 1] : null;
+  const blindCurrentIndex = blindCurrent ? blindCurrent.index : null;
+  const isLatencyLocked = isBandFrozen;
+
+  const seedFingerprint = useMemo(() => {
+    const normalized = blindTestSeed.trim();
+    if (!normalized) return "00000000";
+    const hashed = hashSeed(normalized);
+    return hashed.toString(16).padStart(8, "0");
+  }, [blindTestSeed]);
+
+  const bandTrimB = bandMatchRmsEnabled ? bandTrimResult?.trims.B ?? 1 : 1;
+  const bandTrimC = bandMatchRmsEnabled ? bandTrimResult?.trims.C ?? 1 : 1;
+  const totalTrimA = Math.max(originalVol, 1e-6);
+  const totalTrimB = hasIrB ? Math.max(convolvedMatchGain * convolvedVol * bandTrimB, 1e-6) : null;
+  const totalTrimC = hasIrC ? Math.max(convolvedCMatchGain * bandCVol * bandTrimC, 1e-6) : null;
+  const latencyBSeconds = Math.max(0, convolverLatencyRef.current);
+  const latencyCSeconds = Math.max(0, convolverLatencyCRef.current);
+
+  const linearToDbValue = (value: number | null) => {
+    if (!value || value <= 0) return null;
+    return 20 * Math.log10(value);
+  };
+
+  const pathMetrics: { A: PathMetric; B?: PathMetric | null; C?: PathMetric | null } = {
+    A: {
+      trimLinear: totalTrimA,
+      trimDb: linearToDbValue(totalTrimA),
+      latencySeconds: 0,
+      bandMultiplier: 1,
+    },
+    B: totalTrimB
+      ? {
+          trimLinear: totalTrimB,
+          trimDb: linearToDbValue(totalTrimB),
+          latencySeconds: latencyBSeconds,
+          bandMultiplier: bandMatchRmsEnabled ? bandTrimB : 1,
+        }
+      : null,
+    C: totalTrimC
+      ? {
+          trimLinear: totalTrimC,
+          trimDb: linearToDbValue(totalTrimC),
+          latencySeconds: latencyCSeconds,
+          bandMultiplier: bandMatchRmsEnabled ? bandTrimC : 1,
+        }
+      : null,
+  } as const;
 
   useEffect(() => {
     if (!formattedKPerCh) {
@@ -168,52 +425,95 @@ function SonicSuiteApp() {
     }
   }
 
-  async function onPickIR(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
+  type IrSlot = "B" | "C";
+
+  async function loadIrSlot(slot: IrSlot, file: File) {
+    const slotMap = {
+      B: {
+        originalRef: irOriginalRef,
+        bufferRef: irBufRef,
+        setOriginal: setIrOriginal,
+        setBuffer: setIrBuffer,
+        setName: setIrName,
+        matchGainRef,
+        setMatchGain: setConvolvedMatchGain,
+        setGainMatched: setConvolvedGainMatched,
+        convolverLatency: convolverLatencyRef,
+      },
+      C: {
+        originalRef: irCOriginalRef,
+        bufferRef: irCBufRef,
+        setOriginal: setIrCOriginal,
+        setBuffer: setIrCBuffer,
+        setName: setIrCName,
+        matchGainRef: matchGainCRef,
+        setMatchGain: setConvolvedCMatchGain,
+        setGainMatched: setConvolvedCGainMatched,
+        convolverLatency: convolverLatencyCRef,
+      },
+    } as const;
+
+    const slotState = slotMap[slot];
+
     try {
-      const buf = await decodeFile(f);
-      irOriginalRef.current = buf;
-      setIrOriginal(buf);
-      irBufRef.current = buf;
-      setIrBuffer(buf);
-      setIrName(f.name);
-      setConvolvedMatchGain(1);
-      setConvolvedGainMatched(false);
-      residualBasisRef.current = null;
-      residualBufRef.current = null;
-      if (matchGainRef.current) {
-        matchGainRef.current.gain.value = 1;
+      const buf = await decodeFile(file);
+      slotState.originalRef.current = buf;
+      slotState.setOriginal(buf);
+      slotState.bufferRef.current = buf;
+      slotState.setBuffer(buf);
+      slotState.setName(file.name);
+      slotState.setMatchGain(1);
+      slotState.setGainMatched(false);
+      if (slotState.matchGainRef.current) {
+        slotState.matchGainRef.current.gain.value = 1;
       }
-      if (mode === "convolved" && gainRef.current) {
-        gainRef.current.gain.value = convolvedVol;
+      slotState.convolverLatency.current = 0;
+
+      if (slot === "B") {
+        residualBasisRef.current = null;
+        residualBufRef.current = null;
+        if (mode === "convolved" && gainRef.current) {
+          gainRef.current.gain.value = convolvedVol;
+        }
       }
-      convolverLatencyRef.current = 0;
+
       const contextRate = audioCtxRef.current?.sampleRate ?? buf.sampleRate;
       setSessionSampleRate(contextRate);
       setStatus((s) =>
-        s + `
-IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
+        s +
+        `
+IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`,
       );
     } catch (err) {
-      irOriginalRef.current = null;
-      irBufRef.current = null;
-      setIrOriginal(null);
-      setIrBuffer(null);
-      setIrName("");
-      setConvolvedMatchGain(1);
-      setConvolvedGainMatched(false);
-      residualBasisRef.current = null;
-      residualBufRef.current = null;
-      if (matchGainRef.current) {
-        matchGainRef.current.gain.value = 1;
+      slotState.originalRef.current = null;
+      slotState.bufferRef.current = null;
+      slotState.setOriginal(null);
+      slotState.setBuffer(null);
+      slotState.setName("");
+      slotState.setMatchGain(1);
+      slotState.setGainMatched(false);
+      if (slotState.matchGainRef.current) {
+        slotState.matchGainRef.current.gain.value = 1;
       }
-      if (mode === "convolved" && gainRef.current) {
-        gainRef.current.gain.value = convolvedVol;
+      if (slot === "B") {
+        residualBasisRef.current = null;
+        residualBufRef.current = null;
       }
-      convolverLatencyRef.current = 0;
-      setStatus(`IR load failed: ${(err as Error).message}`);
+      slotState.convolverLatency.current = 0;
+      setStatus(`IR-${slot} load failed: ${(err as Error).message}`);
     }
+  }
+
+  async function onPickIRB(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await loadIrSlot("B", file);
+  }
+
+  async function onPickIRC(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await loadIrSlot("C", file);
   }
 
   function teardownGraph() {
@@ -228,20 +528,213 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     srcRef.current?.disconnect();
     convRef.current?.disconnect();
     matchGainRef.current?.disconnect();
+    convCRef.current?.disconnect();
+    matchGainCRef.current?.disconnect();
     gainRef.current?.disconnect();
+    auditionRouterRef.current?.dispose();
     srcRef.current = null;
     convRef.current = null;
     matchGainRef.current = null;
+    convCRef.current = null;
+    matchGainCRef.current = null;
     gainRef.current = null;
+    auditionRouterRef.current = null;
   }
 
   function makeGraph(at: number, playbackMode: Mode = mode) {
     const ctx = ensureCtx();
-    const isDifference = playbackMode === "difference";
-    const isConvolved = playbackMode === "convolved";
+    const usingBandScope = bandScopeEngaged;
+    const isDifferenceMode = playbackMode === "difference";
+    const shouldUseRouter = usingBandScope || isDifferenceMode;
+
+    const bandSettings: BandSettings = {
+      enabled: usingBandScope && !isFullRangeBand,
+      minHz: playbackBandMinHz,
+      maxHz: playbackBandMaxHz,
+    };
 
     const music = musicBufRef.current;
     const residual = residualBufRef.current;
+
+    const startAudition = () => {
+      if (!music) {
+        setStatus("No music loaded.");
+        return;
+      }
+
+      const ensurePathAvailable = (path: AuditionPath): AuditionPath | null => {
+        switch (path) {
+          case "A":
+            return "A";
+          case "B":
+            return hasIrB ? "B" : null;
+          case "C":
+            return hasIrC ? "C" : null;
+          case "DeltaAB":
+            return hasIrB ? "DeltaAB" : null;
+          case "DeltaAC":
+            return hasIrC ? "DeltaAC" : null;
+          case "DeltaBC":
+            return hasIrB && hasIrC ? "DeltaBC" : null;
+          default:
+            return null;
+        }
+      };
+
+      const buffer = music;
+      const src = new AudioBufferSourceNode(ctx, { buffer });
+      const volume = new GainNode(ctx, { gain: 1 });
+
+      srcRef.current = src;
+      gainRef.current = volume;
+
+      const router = new BandAuditionRouter(ctx, {
+        destination: volume,
+        band: bandSettings,
+      });
+      auditionRouterRef.current = router;
+
+      volume.connect(ctx.destination);
+
+      const dryTap = new GainNode(ctx, { gain: 1 });
+      src.connect(dryTap);
+      router.connectBase("A", dryTap);
+
+      let latencies: LatencySecondsMap = { A: 0 };
+      let trims: Partial<Record<BasePath, number>> = {
+        A: Math.max(originalVol, 1e-6),
+      };
+
+      const irB = irBufRef.current;
+      if (irB) {
+        const convB = new ConvolverNode(ctx, { buffer: irB, disableNormalization: false });
+        const matchGainB = new GainNode(ctx, { gain: Math.max(convolvedMatchGain, 1e-6) });
+        convRef.current = convB;
+        matchGainRef.current = matchGainB;
+        src.connect(convB).connect(matchGainB);
+        router.connectBase("B", matchGainB);
+        latencies.B = Math.max(0, convolverLatencyRef.current);
+        trims.B = Math.max(convolvedMatchGain * convolvedVol, 1e-6);
+      } else {
+        convRef.current = null;
+        matchGainRef.current = null;
+      }
+
+      const irC = irCBufRef.current;
+      if (irC) {
+        const convC = new ConvolverNode(ctx, { buffer: irC, disableNormalization: false });
+        const matchGainC = new GainNode(ctx, { gain: Math.max(convolvedCMatchGain, 1e-6) });
+        convCRef.current = convC;
+        matchGainCRef.current = matchGainC;
+        src.connect(convC).connect(matchGainC);
+        router.connectBase("C", matchGainC);
+        latencies.C = Math.max(0, convolverLatencyCRef.current);
+        trims.C = Math.max(convolvedCMatchGain * bandCVol, 1e-6);
+      } else {
+        convCRef.current = null;
+        matchGainCRef.current = null;
+      }
+
+      if (!blindConfigRef.current && bandTrimResult && bandMatchRmsEnabled) {
+        if (bandTrimResult.trims.B && trims.B) {
+          trims.B *= bandTrimResult.trims.B;
+        }
+        if (bandTrimResult.trims.C && trims.C) {
+          trims.C *= bandTrimResult.trims.C;
+        }
+      }
+
+      if (blindConfigRef.current) {
+        latencies = { ...latencies, ...blindConfigRef.current.latencies };
+        trims = { ...trims, ...blindConfigRef.current.trims };
+      }
+
+      router.updateBand(bandSettings);
+      router.updateLatencies(latencies);
+      router.updateTrims(trims);
+
+      const clampedStart = Math.min(at, buffer.duration);
+      startOffsetRef.current = clampedStart;
+      setPlaybackPosition(clampedStart);
+
+      const latencyValues = Object.values(latencies).filter(
+        (value): value is number => typeof value === "number",
+      );
+      const maxLatency = latencyValues.length > 0 ? Math.max(...latencyValues) : 0;
+      const startAt = Math.max(0, clampedStart - maxLatency);
+      const requestedPath = bandPathOverrideRef.current ?? resolveModePath(playbackMode);
+      let resolvedPath = ensurePathAvailable(requestedPath);
+      if (!resolvedPath && playbackMode === "difference") {
+        let fallbackDelta: DifferencePath | null = null;
+        for (const candidate of DIFFERENCE_PRIORITY) {
+          if (ensurePathAvailable(candidate)) {
+            fallbackDelta = candidate;
+            break;
+          }
+        }
+        if (fallbackDelta) {
+          resolvedPath = fallbackDelta;
+          bandPathOverrideRef.current = null;
+          if (differencePath !== fallbackDelta) {
+            setDifferencePath(fallbackDelta);
+          }
+          setFrozenDifferencePath((prev) => (prev ? fallbackDelta : prev));
+        }
+      }
+      if (!resolvedPath) {
+        setStatus("Load the required impulse responses to audition that path.");
+        resolvedPath = "A";
+        bandPathOverrideRef.current = null;
+      }
+      bandPathRef.current = resolvedPath;
+      router.setActive(resolvedPath);
+
+      src.onended = () => {
+        if (srcRef.current !== src) return;
+        startOffsetRef.current = 0;
+        setPlaybackPosition(0);
+        setPlaying(false);
+        teardownGraph();
+      };
+
+      const startPlayback = () => {
+        try {
+          src.start(0, startAt);
+          startTimeRef.current = ctx.currentTime;
+          setPlaying(true);
+        } catch (err) {
+          console.error("Audio source start failed", err);
+          const message = err instanceof Error ? err.message : String(err);
+          setStatus(`Playback failed: ${message}`);
+          teardownGraph();
+        }
+      };
+
+      if (ctx.state === "suspended") {
+        ctx
+          .resume()
+          .then(startPlayback)
+          .catch((err) => {
+            console.error("Audio context resume failed", err);
+            const message = err instanceof Error ? err.message : String(err);
+            setStatus(`Playback blocked by browser autoplay policy: ${message}`);
+            teardownGraph();
+          });
+      } else {
+        startPlayback();
+      }
+    };
+
+    if (shouldUseRouter) {
+      startAudition();
+      return;
+    }
+
+    auditionRouterRef.current?.dispose();
+    auditionRouterRef.current = null;
+
+    const isDifference = isDifferenceMode;
+    const isConvolved = playbackMode === "convolved";
 
     let buffer: AudioBuffer | null = null;
     if (isDifference) {
@@ -270,6 +763,8 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
 
     matchGainRef.current = null;
     convRef.current = null;
+    convCRef.current = null;
+    matchGainCRef.current = null;
 
     if (isConvolved) {
       const ir = irBufRef.current;
@@ -416,6 +911,271 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     seekTo(base + delta, isPlaying);
   }
 
+  const resetBlindTest = useCallback(
+    (reason?: string) => {
+      if (!blindConfigRef.current) return;
+      blindConfigRef.current = null;
+      bandPathOverrideRef.current = null;
+      const defaultPath = resolveModePath(mode);
+      bandPathRef.current = defaultPath;
+      if (bandScopeEngaged && auditionRouterRef.current) {
+        auditionRouterRef.current.setActive(defaultPath);
+      }
+      resetBlindController();
+      setFrozenDifferencePath(null);
+      if (reason) {
+        setStatus((prev) => `${prev}\nBlind test reset: ${reason}`);
+      }
+    },
+    [auditionRouterRef, bandScopeEngaged, mode, resetBlindController, resolveModePath, setStatus],
+  );
+
+  const handleBlindModeChange = useCallback(
+    (value: BlindTestMode | "off") => {
+      if (value === blindTestMode) return;
+      if (value === "off") {
+        setBlindTestMode("off");
+        resetBlindTest();
+      } else {
+        setBlindTestMode(value);
+        resetBlindTest();
+      }
+    },
+    [blindTestMode, resetBlindTest],
+  );
+
+  const handleBlindSeedChange = useCallback(
+    (seed: string) => {
+      setBlindTestSeed(seed.trim());
+    },
+    [setBlindTestSeed],
+  );
+
+  const handleBlindStart = useCallback(() => {
+    if (blindTestMode === "off") {
+      setStatus((prev) => `${prev}\nSelect a blind-test mode before starting.`);
+      return;
+    }
+    if (!hasIrB) {
+      setStatus((prev) => `${prev}\nLoad IR-B to start blind testing.`);
+      return;
+    }
+    if ((blindTestMode === "ACX" || blindTestMode === "BCX" || blindTestMode === "ABCX") && !hasIrC) {
+      setStatus((prev) => `${prev}\nLoad IR-C to use ${blindTestMode}.`);
+      return;
+    }
+    if (!isBandActive) {
+      setStatus((prev) => `${prev}\nSelect a playback band before starting a blind test.`);
+      return;
+    }
+
+    const sanitizedSeed = blindTestSeed.trim() || Date.now().toString(36);
+    if (sanitizedSeed !== blindTestSeed) {
+      setBlindTestSeed(sanitizedSeed);
+    }
+
+    const trims: Partial<Record<BasePath, number>> = {
+      A: Math.max(originalVol, 1e-6),
+    };
+    if (hasIrB) {
+      trims.B = Math.max(convolvedMatchGain * convolvedVol, 1e-6);
+    }
+    if (hasIrC) {
+      trims.C = Math.max(convolvedCMatchGain * bandCVol, 1e-6);
+    }
+    if (bandMatchRmsEnabled && bandTrimResult?.trims.B && trims.B) {
+      trims.B *= bandTrimResult.trims.B;
+    }
+    if (bandMatchRmsEnabled && bandTrimResult?.trims.C && trims.C) {
+      trims.C *= bandTrimResult.trims.C;
+    }
+
+    const latencies: Partial<Record<BasePath, number>> = {
+      A: 0,
+    };
+    if (hasIrB) {
+      latencies.B = Math.max(0, convolverLatencyRef.current);
+    }
+    if (hasIrC) {
+      latencies.C = Math.max(0, convolverLatencyCRef.current);
+    }
+
+    const bandSettings: BandSettings = {
+      enabled: isBandActive,
+      minHz: playbackBandMinHz,
+      maxHz: playbackBandMaxHz,
+    };
+
+    configureBlindTest({
+      mode: blindTestMode,
+      band: bandSettings,
+      trims,
+      latencies,
+      seed: sanitizedSeed,
+    });
+
+    blindConfigRef.current = {
+      mode: blindTestMode,
+      band: bandSettings,
+      trims,
+      latencies,
+      seed: sanitizedSeed,
+    };
+    setFrozenDifferencePath(differencePath);
+
+    if (auditionRouterRef.current) {
+      auditionRouterRef.current.updateTrims(trims);
+      auditionRouterRef.current.updateLatencies(latencies);
+    }
+
+    setStatus((prev) => `${prev}\nBlind test prepared (mode ${blindTestMode}, seed ${sanitizedSeed}).`);
+  }, [
+    auditionRouterRef,
+    bandCVol,
+    bandMatchRmsEnabled,
+    bandTrimResult,
+    blindTestMode,
+    blindTestSeed,
+    configureBlindTest,
+    convolvedCMatchGain,
+    convolvedMatchGain,
+    convolvedVol,
+    convolverLatencyCRef,
+    convolverLatencyRef,
+    differencePath,
+    hasIrB,
+    hasIrC,
+    isBandActive,
+    originalVol,
+    playbackBandMinHz,
+    playbackBandMaxHz,
+    setBlindTestSeed,
+    setStatus,
+  ]);
+
+  const handleBlindReset = useCallback(() => {
+    blindConfigRef.current = null;
+    resetBlindController();
+    setFrozenDifferencePath(null);
+    setStatus((prev) => `${prev}\nBlind test reset.`);
+  }, [resetBlindController, setStatus]);
+
+  const handleBlindReveal = useCallback(() => {
+    const actual = revealBlindChoice();
+    if (actual) {
+      setStatus((prev) => `${prev}\nReveal: X was ${actual}.`);
+    }
+  }, [revealBlindChoice, setStatus]);
+
+  const handleBlindNext = useCallback(() => {
+    nextBlindTrial();
+  }, [nextBlindTrial]);
+
+  const handleBlindGuess = useCallback(
+    (choice: BasePath) => {
+      const outcome = makeBlindChoice(choice);
+      if (outcome) {
+        setStatus((prev) =>
+          `${prev}\nGuess ${choice}: ${outcome.correct ? "correct" : "incorrect"} (X was ${outcome.actual}).`,
+        );
+      }
+    },
+    [makeBlindChoice, setStatus],
+  );
+
+  const handleBlindAudition = useCallback(
+    (target: "A" | "B" | "C" | "X") => {
+      if (target === "B" && !hasIrB) {
+        setStatus((prev) => `${prev}\nLoad IR-B to audition path B.`);
+        return;
+      }
+      if (target === "C" && !hasIrC) {
+        setStatus((prev) => `${prev}\nLoad IR-C to audition path C.`);
+        return;
+      }
+      if (!bandScopeEngaged) {
+        setStatus((prev) => `${prev}\nSelect a playback band before auditioning blind-test paths.`);
+        return;
+      }
+      if (target === "X" && !blindConfigRef.current) {
+        setStatus((prev) => `${prev}\nStart a blind test before auditioning X.`);
+        return;
+      }
+
+      const actualPath: BasePath = target === "X" ? (blindCurrent?.actual ?? "A") : target;
+      bandPathOverrideRef.current = actualPath;
+      bandPathRef.current = actualPath;
+
+      const router = auditionRouterRef.current;
+      if (router) {
+        router.setActive(actualPath);
+      }
+    },
+    [auditionRouterRef, bandScopeEngaged, blindCurrent, hasIrB, hasIrC, setStatus],
+  );
+
+  function setPlaybackBandRange(minHz: number, maxHz: number) {
+    if (isBandFrozen) return;
+    const [nextMin, nextMax] = clampBandRange(minHz, maxHz);
+    if (Math.abs(nextMin - playbackBandMinHz) < 0.01 && Math.abs(nextMax - playbackBandMaxHz) < 0.01) {
+      return;
+    }
+    const prevEngaged = bandScopeEngaged;
+    const nextIsFull = isFullRangePair(nextMin, nextMax);
+    const nextEngaged = !nextIsFull;
+    setPlaybackBandHz([nextMin, nextMax]);
+    bandPathOverrideRef.current = null;
+    if (!prevEngaged && nextEngaged) {
+      bandPathRef.current = resolveModePath(mode);
+    }
+    if (nextIsFull) {
+      bandPathRef.current = resolveModePath(mode);
+    }
+  }
+
+  function handlePlaybackPresetSelect(range: [number, number]) {
+    if (isBandFrozen) return;
+    setPlaybackBandRange(range[0], range[1]);
+  }
+
+  function handlePlaybackBandMinSlider(event: ChangeEvent<HTMLInputElement>) {
+    if (isBandFrozen) return;
+    const value = Number(event.target.value);
+    if (!Number.isFinite(value)) return;
+    const freq = sliderValueToFreq(value);
+    setPlaybackBandRange(freq, playbackBandMaxHz);
+  }
+
+  function handlePlaybackBandMaxSlider(event: ChangeEvent<HTMLInputElement>) {
+    if (isBandFrozen) return;
+    const value = Number(event.target.value);
+    if (!Number.isFinite(value)) return;
+    const freq = sliderValueToFreq(value);
+    setPlaybackBandRange(playbackBandMinHz, freq);
+  }
+
+  function handlePlaybackBandMinInputChange(event: ChangeEvent<HTMLInputElement>) {
+    if (isBandFrozen) return;
+    const value = Number(event.target.value);
+    if (!Number.isFinite(value)) return;
+    setPlaybackBandRange(value, playbackBandMaxHz);
+  }
+
+  function handlePlaybackBandMaxInputChange(event: ChangeEvent<HTMLInputElement>) {
+    if (isBandFrozen) return;
+    const value = Number(event.target.value);
+    if (!Number.isFinite(value)) return;
+    setPlaybackBandRange(playbackBandMinHz, value);
+  }
+
+  function handlePlaybackScopeKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (isBandFrozen) return;
+    if (event.key.toLowerCase() === "f") {
+      event.preventDefault();
+      setPlaybackBandRange(PLAYBACK_BAND_MIN_HZ, PLAYBACK_BAND_MAX_HZ);
+    }
+  }
+
   function applyDifferenceThreshold() {
     if (!differenceControlsDirty || isResidualComputing) return;
     setDifferenceThresholdDb(pendingDifferenceThresholdDb);
@@ -424,6 +1184,9 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     }
     if (bandRangeDirty) {
       setSoloBandHz([pendingSoloBandHz[0], pendingSoloBandHz[1]]);
+    }
+    if (bandMatchRmsDirty) {
+      setBandMatchRmsEnabled(pendingBandMatchRmsEnabled);
     }
   }
 
@@ -437,6 +1200,9 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     }
     if (bandRangeDirty) {
       setPendingSoloBandHz([soloBandHz[0], soloBandHz[1]]);
+    }
+    if (bandMatchRmsDirty) {
+      setPendingBandMatchRmsEnabled(bandMatchRmsEnabled);
     }
   }
 
@@ -609,6 +1375,212 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
   }, [soloBandMinHz, soloBandMaxHz]);
 
   useEffect(() => {
+    setPendingBandMatchRmsEnabled(bandMatchRmsEnabled);
+  }, [bandMatchRmsEnabled]);
+
+  useEffect(() => {
+    if (!blindConfigRef.current) return;
+    resetBlindTest("Playback band changed.");
+  }, [resetBlindTest, isBandActive, playbackBandMinHz, playbackBandMaxHz]);
+
+  useEffect(() => {
+    if (!blindConfigRef.current) return;
+    resetBlindTest("Impulse responses changed.");
+  }, [resetBlindTest, irBuffer, irCBuffer, musicBuffer]);
+
+  useEffect(() => {
+    if (!blindConfigRef.current) return;
+    if (!bandScopeEngaged) {
+      resetBlindTest("Playback band returned to full range.");
+    }
+  }, [bandScopeEngaged, resetBlindTest]);
+
+  useEffect(() => {
+    const music = musicBufRef.current;
+    const irB = irBufRef.current;
+    const irC = irCBufRef.current;
+    const bandActive = bandScopeEngaged;
+    if (!music || (!irB && !irC) || !bandActive || !bandMatchRmsEnabled) {
+      setBandTrimResult(null);
+      setBandTrimComputing(false);
+      return;
+    }
+    let cancelled = false;
+    setBandTrimComputing(true);
+    const bandSettings: BandSettings = {
+      enabled: isBandActive,
+      minHz: playbackBandMinHz,
+      maxHz: playbackBandMaxHz,
+    };
+    computeBandTrims({
+      dry: music,
+      irB: irB ?? undefined,
+      irC: irC ?? undefined,
+      band: bandSettings,
+    })
+      .then((result) => {
+        if (cancelled) return;
+        setBandTrimResult(result);
+      })
+      .catch((err) => {
+        console.warn("Band trim computation failed", err);
+        if (!cancelled) {
+          setBandTrimResult(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBandTrimComputing(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    bandScopeEngaged,
+    bandMatchRmsEnabled,
+    irBuffer,
+    irCBuffer,
+    isBandActive,
+    musicBuffer,
+    playbackBandMinHz,
+    playbackBandMaxHz,
+  ]);
+
+  useEffect(() => {
+    if (!irCBuffer) {
+      setBandCVol(1);
+    }
+  }, [irCBuffer]);
+
+  useEffect(() => {
+    if (!auditionRouterRef.current) return;
+    if (!bandScopeEngaged) return;
+    const trims: Partial<Record<BasePath, number>> = {
+      A: Math.max(originalVol, 1e-6),
+      B: hasIrB ? Math.max(convolvedMatchGain * convolvedVol, 1e-6) : undefined,
+      C: hasIrC ? Math.max(convolvedCMatchGain * bandCVol, 1e-6) : undefined,
+    };
+    if (bandMatchRmsEnabled && bandTrimResult) {
+      if (trims.B && bandTrimResult.trims.B) {
+        trims.B *= bandTrimResult.trims.B;
+      }
+      if (trims.C && bandTrimResult.trims.C) {
+        trims.C *= bandTrimResult.trims.C;
+      }
+    }
+    auditionRouterRef.current.updateTrims(trims);
+  }, [
+    bandScopeEngaged,
+    bandMatchRmsEnabled,
+    bandTrimResult,
+    originalVol,
+    convolvedVol,
+    convolvedMatchGain,
+    convolvedCMatchGain,
+    bandCVol,
+    hasIrB,
+    hasIrC,
+  ]);
+
+  useEffect(() => {
+    if (!bandScopeEngaged) return;
+    const currentPath = bandPathRef.current;
+    const needsB = currentPath === "B" || currentPath === "DeltaAB" || currentPath === "DeltaBC";
+    const needsC = currentPath === "C" || currentPath === "DeltaAC" || currentPath === "DeltaBC";
+    const hasCAssets = Boolean(irCBuffer && irCOriginal && irCName);
+    if ((needsB && !hasIrB) || (needsC && !hasCAssets)) {
+      bandPathRef.current = "A";
+      bandPathOverrideRef.current = null;
+      if (auditionRouterRef.current) {
+        auditionRouterRef.current.setActive("A");
+      }
+      setStatus((prev) => `${prev}\nPlayback path reset to A; required impulse response missing.`);
+    }
+  }, [bandScopeEngaged, hasIrB, irBuffer, irCBuffer, irCOriginal, irCName, setStatus]);
+
+  useEffect(() => {
+    if (bandScopeEngaged) return;
+    bandPathOverrideRef.current = null;
+    bandPathRef.current = resolveModePath(mode);
+  }, [bandScopeEngaged, mode, resolveModePath]);
+
+  useEffect(() => {
+    if (mode !== "difference") return;
+    if (bandPathOverrideRef.current) return;
+    bandPathRef.current = differencePath;
+    const router = auditionRouterRef.current;
+    if (router) {
+      router.setActive(differencePath);
+    }
+  }, [differencePath, mode]);
+
+  useEffect(() => {
+    if (mode !== "difference") return;
+    const handleGlobalKey = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      const target = event.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName.toLowerCase();
+        if (target.isContentEditable || tag === "input" || tag === "textarea" || tag === "select") {
+          return;
+        }
+      }
+      let next: DifferencePath | null = null;
+      switch (event.key) {
+        case "5":
+          next = "DeltaAB";
+          break;
+        case "6":
+          next = "DeltaAC";
+          break;
+        case "7":
+          next = "DeltaBC";
+          break;
+        default:
+          return;
+      }
+      if (!next) return;
+      if (differencePath === next) return;
+      if (!availableDifferencePaths.includes(next)) return;
+      if (isDifferenceFrozen) return;
+      event.preventDefault();
+      handleDifferencePathChange(next);
+    };
+    window.addEventListener("keydown", handleGlobalKey);
+    return () => {
+      window.removeEventListener("keydown", handleGlobalKey);
+    };
+  }, [availableDifferencePaths, differencePath, handleDifferencePathChange, isDifferenceFrozen, mode]);
+
+  useEffect(() => {
+    if (!auditionRouterRef.current) return;
+    if (!bandScopeEngaged) return;
+    auditionRouterRef.current.updateBand({
+      enabled: isBandActive,
+      minHz: playbackBandMinHz,
+      maxHz: playbackBandMaxHz,
+    });
+  }, [bandScopeEngaged, isBandActive, playbackBandMinHz, playbackBandMaxHz]);
+
+  useEffect(() => {
+    const [prevMin, prevMax] = previousPlaybackBandRef.current;
+    if (Math.abs(prevMin - playbackBandMinHz) < 0.01 && Math.abs(prevMax - playbackBandMaxHz) < 0.01) {
+      return;
+    }
+    previousPlaybackBandRef.current = [playbackBandMinHz, playbackBandMaxHz];
+    if (!isPlaying) return;
+    const resumeAt = Math.min(currentOffset(), getModeDuration(mode));
+    teardownGraph();
+    startOffsetRef.current = resumeAt;
+    setPlaybackPosition(resumeAt);
+    const makeGraphFn = makeGraphRef.current;
+    if (typeof makeGraphFn === "function") {
+      makeGraphFn(resumeAt, mode);
+    }
+  }, [getModeDuration, isPlaying, mode, playbackBandMinHz, playbackBandMaxHz]);
+
+  useEffect(() => {
     const { worker, error } = createModuleWorker(new URL("./workers/residualWorker.ts", import.meta.url));
     if (!worker) {
       if (error) {
@@ -675,6 +1647,8 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     const nextDuration = getModeDuration(next);
     const clamped = Math.min(clampedCurrent, nextDuration > 0 ? nextDuration : clampedCurrent);
     teardownGraph();
+    bandPathOverrideRef.current = null;
+    bandPathRef.current = resolveModePath(next);
     setMode(next);
     startOffsetRef.current = clamped;
     setPlaybackPosition(clamped);
@@ -706,6 +1680,7 @@ IR loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(3)} s`
     onChangeOriginalVol(1);
     onChangeConvolvedVol(1);
     onChangeDifferenceVol(1);
+    setBandCVol(1);
   }
 
   function handleIrManualTrim(startMs: number, endMs: number) {
@@ -851,15 +1826,14 @@ ${message}`);
 
   async function matchConvolvedRMS() {
     const music = musicBufRef.current;
-    const ir = irBufRef.current;
-    if (!music || !ir) {
-      setStatus("Load music and IR first.");
+    const irB = irBufRef.current;
+    const irC = irCBufRef.current;
+    if (!music || (!irB && !irC)) {
+      setStatus("Load music and at least one IR first.");
       return;
     }
 
-    setMatchingRms(true);
-    setConvolvedGainMatched(false);
-    try {
+    const analyseSlot = async (ir: AudioBuffer) => {
       const targetRate = audioCtxRef.current?.sampleRate ?? music.sampleRate;
       const dryBuffer = resampleAudioBuffer(music, targetRate);
       const wetIr = resampleAudioBuffer(ir, targetRate);
@@ -873,24 +1847,58 @@ ${message}`);
       const rendered = await offline.startRendering();
 
       const offset = computeAnalysisOffset(wetIr, rendered.length);
-      convolverLatencyRef.current = offset / targetRate;
       const [dryRms, wetRms] = alignedRmsPair(dryBuffer, rendered, offset);
       let ratio = wetRms > 0 ? dryRms / wetRms : 1;
       if (!Number.isFinite(ratio) || ratio <= 0) ratio = 1;
       const clamped = Math.min(4, Math.max(0.1, ratio));
-      setConvolvedMatchGain(clamped);
-      setConvolvedGainMatched(true);
-      if (matchGainRef.current) {
-        matchGainRef.current.gain.value = clamped;
+      return {
+        matchGain: clamped,
+        latencySeconds: offset / targetRate,
+      };
+    };
+
+    setMatchingRms(true);
+    if (irB) setConvolvedGainMatched(false);
+    if (irC) setConvolvedCGainMatched(false);
+
+    const statusLines: string[] = [];
+
+    try {
+      if (irB) {
+        const metrics = await analyseSlot(irB);
+        setConvolvedMatchGain(metrics.matchGain);
+        setConvolvedGainMatched(true);
+        convolverLatencyRef.current = metrics.latencySeconds;
+        if (matchGainRef.current) {
+          matchGainRef.current.gain.value = metrics.matchGain;
+        }
+        if (mode === "convolved" && gainRef.current) {
+          gainRef.current.gain.value = convolvedVol;
+        }
+        if (mode === "original" && gainRef.current) {
+          gainRef.current.gain.value = originalVol;
+        }
+        auditionRouterRef.current?.updateTrims({ B: metrics.matchGain });
+        auditionRouterRef.current?.updateLatencies({ B: metrics.latencySeconds });
+        statusLines.push(`IR-B playback RMS gain set to ${metrics.matchGain.toFixed(2)}x.`);
       }
-      if (mode === "convolved" && gainRef.current) {
-        gainRef.current.gain.value = convolvedVol;
+
+      if (irC) {
+        const metrics = await analyseSlot(irC);
+        setConvolvedCMatchGain(metrics.matchGain);
+        setConvolvedCGainMatched(true);
+        convolverLatencyCRef.current = metrics.latencySeconds;
+        if (matchGainCRef.current) {
+          matchGainCRef.current.gain.value = metrics.matchGain;
+        }
+        auditionRouterRef.current?.updateTrims({ C: metrics.matchGain });
+        auditionRouterRef.current?.updateLatencies({ C: metrics.latencySeconds });
+        statusLines.push(`IR-C playback RMS gain set to ${metrics.matchGain.toFixed(2)}x.`);
       }
-      if (mode === "original" && gainRef.current) {
-        gainRef.current.gain.value = originalVol;
+
+      if (statusLines.length > 0) {
+        setStatus((s) => s + `\n${statusLines.join("\n")}`);
       }
-      setStatus((s) => s + `
-Playback RMS gain set to ${clamped.toFixed(2)}x.`);
     } catch (err) {
       setStatus(`RMS match failed: ${(err as Error).message}`);
     } finally {
@@ -917,7 +1925,7 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
     src.connect(conv).connect(gain).connect(off.destination);
     src.start();
 
-    setStatus("Renderingâ€¦");
+    setStatus("Rendering...");
     const rendered = await off.startRendering();
 
     const irForAnalysis = resampleAudioBuffer(ir, sr);
@@ -1005,6 +2013,18 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
   }
 
   const canMatchRms = Boolean(musicBufRef.current && irBuffer);
+  const irBStatus = pathMetrics.B
+    ? {
+        latencyMs: pathMetrics.B.latencySeconds * 1000,
+        trimDb: pathMetrics.B.trimDb,
+      }
+    : null;
+  const irCStatus = pathMetrics.C
+    ? {
+        latencyMs: pathMetrics.C.latencySeconds * 1000,
+        trimDb: pathMetrics.C.trimDb,
+      }
+    : null;
 
   return (
     <div className="app">
@@ -1019,11 +2039,17 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
 
         <FileInputs
           onPickMusic={onPickMusic}
-          onPickIR={onPickIR}
+          onPickIRB={onPickIRB}
+          onPickIRC={onPickIRC}
           musicBuffer={musicBuffer}
           musicName={musicName}
           irBuffer={irBuffer}
           irName={irName}
+          irCBuffer={irCBuffer}
+          irCName={irCName}
+          irMetadata={irBStatus}
+          irCMetadata={irCStatus}
+          sampleRate={sessionSampleRate}
         />
 
         {irOriginal && (
@@ -1112,13 +2138,6 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
             >
               FR (Difference)
             </button>
-            <button
-              type="button"
-              className={`segmented-control__segment${view === "frpink" ? " is-active" : ""}`}
-              onClick={() => setView("frpink")}
-            >
-              FR (Pink Noise)
-            </button>
           </div>
         </section>
 
@@ -1131,7 +2150,126 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
                   <p className="panel-desc">Switch modes, control transport, and balance the convolved gain.</p>
                 </div>
               </div>
+              <div className={`playback-scope${isBandFrozen ? " playback-scope--frozen" : ""}`}>
+                <div className="playback-scope__header">
+                  <span className="playback-scope__title">Playback Scope</span>
+                  <span className="playback-scope__range">{playbackBandLabel}</span>
+                  {isBandFrozen ? <span className="playback-scope__badge">Frozen for test</span> : null}
+                </div>
+                <div className="playback-scope__presets" role="group" aria-label="Playback scope presets">
+                  {BAND_PRESETS.map((preset) => {
+                    const isActive = playbackPresetValue === preset.value;
+                    const rangeLabel = `${formatHz(preset.range[0])} - ${formatHz(preset.range[1])}`;
+                    return (
+                      <button
+                        key={preset.value}
+                        type="button"
+                        className={`playback-scope__chip${isActive ? " is-active" : ""}`}
+                        onClick={() => handlePlaybackPresetSelect(preset.range)}
+                        aria-pressed={isActive}
+                        disabled={isBandFrozen}
+                      >
+                        <span className="playback-scope__chip-label">{preset.label}</span>
+                        <span className="playback-scope__chip-range">{rangeLabel}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div
+                  className="frdifference-band-slider playback-scope__slider"
+                  aria-label={`Playback scope frequency range ${playbackBandLabel}`}
+                >
+                  <div className="frdifference-band-slider__track" />
+                  <div
+                    className="frdifference-band-slider__selection"
+                    style={{ left: `${playbackSliderStart}%`, width: `${playbackSliderSelectionWidth}%` }}
+                  />
+                  <input
+                    type="range"
+                    min={PLAYBACK_BAND_SLIDER_MIN}
+                    max={PLAYBACK_BAND_SLIDER_MAX}
+                    step={1}
+                    value={playbackBandMinSlider}
+                    onChange={handlePlaybackBandMinSlider}
+                    onKeyDown={handlePlaybackScopeKeyDown}
+                    aria-label="Playback band start frequency"
+                    className="frdifference-band-slider__input"
+                    disabled={isBandFrozen}
+                  />
+                  <input
+                    type="range"
+                    min={PLAYBACK_BAND_SLIDER_MIN}
+                    max={PLAYBACK_BAND_SLIDER_MAX}
+                    step={1}
+                    value={playbackBandMaxSlider}
+                    onChange={handlePlaybackBandMaxSlider}
+                    onKeyDown={handlePlaybackScopeKeyDown}
+                    aria-label="Playback band end frequency"
+                    className="frdifference-band-slider__input frdifference-band-slider__input--upper"
+                    disabled={isBandFrozen}
+                  />
+                </div>
+                <div className="frdifference-band-inputs playback-scope__inputs">
+                  <label className="frdifference-field">
+                    <span>Start (Hz)</span>
+                    <input
+                      type="number"
+                      min={PLAYBACK_BAND_MIN_HZ}
+                      max={PLAYBACK_BAND_MAX_HZ}
+                      step={0.1}
+                      value={playbackBandMinHz.toFixed(1)}
+                      onChange={handlePlaybackBandMinInputChange}
+                      onKeyDown={handlePlaybackScopeKeyDown}
+                      aria-label="Playback band start frequency"
+                      className="frdifference-field-input"
+                      disabled={isBandFrozen}
+                    />
+                  </label>
+                  <label className="frdifference-field">
+                    <span>End (Hz)</span>
+                    <input
+                      type="number"
+                      min={PLAYBACK_BAND_MIN_HZ}
+                      max={PLAYBACK_BAND_MAX_HZ}
+                      step={0.1}
+                      value={playbackBandMaxHz.toFixed(1)}
+                      onChange={handlePlaybackBandMaxInputChange}
+                      onKeyDown={handlePlaybackScopeKeyDown}
+                      aria-label="Playback band end frequency"
+                      className="frdifference-field-input"
+                      disabled={isBandFrozen}
+                    />
+                  </label>
+                </div>
+              </div>
               <ModeBar mode={mode} onChangeMode={onChangeMode} />
+              {mode === "difference" ? (
+                <div className={`difference-selector${isDifferenceFrozen ? " difference-selector--frozen" : ""}`}>
+                  <div className="difference-selector__header">
+                    <span className="difference-selector__label">Difference Pair</span>
+                    {isDifferenceFrozen ? <span className="playback-scope__badge">Frozen for test</span> : null}
+                  </div>
+                  <div className="segmented-control difference-selector__segments" role="group" aria-label="Difference pair">
+                    {differenceOptions.map((option) => {
+                      const isActive = differencePath === option.value;
+                      const isDisabled = option.disabled || isDifferenceFrozen;
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          className={`segmented-control__segment${isActive ? " is-active" : ""}`}
+                          onClick={() => handleDifferencePathChange(option.value)}
+                          aria-pressed={isActive}
+                          disabled={isDisabled}
+                          title={`Keyboard ${option.shortcut}`}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
               <div className="rms-match">
                 <button
                   type="button"
@@ -1153,6 +2291,9 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
                 onChangeConvolvedVol={onChangeConvolvedVol}
                 differenceVol={differenceVol}
                 onChangeDifferenceVol={onChangeDifferenceVol}
+                isBandAudition={bandScopeEngaged}
+                bandCVol={hasIrC ? bandCVol : undefined}
+                onChangeBandCVol={hasIrC ? setBandCVol : undefined}
                 onResetVolumes={resetVolumes}
                 duration={transportDuration}
                 position={clampedPlaybackPosition}
@@ -1160,52 +2301,102 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
                 onSkipForward={() => skipBy(10)}
                 onSkipBackward={() => skipBy(-10)}
               />
-              <div className="inline-diff-graph">
-                <div className="panel-header" style={{ marginTop: 8 }}>
-                  <div>
-                    <h3 className="panel-title" style={{ fontSize: 14 }}>Difference Quick Adjust</h3>
-                    <p className="panel-desc">Adjust absolute difference threshold while listening.</p>
+              {mode === "difference" && (
+                <div className="inline-diff-graph">
+                  <div className="panel-header" style={{ marginTop: 8 }}>
+                    <div className="inline-diff-header">
+                      <h3 className="panel-title" style={{ fontSize: 14 }}>Difference Quick Adjust</h3>
+                      <div className="inline-diff-help-container" ref={inlineDiffHelpRef}>
+                        <button
+                          type="button"
+                          className="inline-diff-help"
+                          aria-label="What is Difference Quick Adjust?"
+                          aria-expanded={isInlineDiffHelpOpen}
+                          aria-controls={inlineDiffHelpPopoverId}
+                          onClick={() => setInlineDiffHelpOpen((prev) => !prev)}
+                        >
+                          ?
+                        </button>
+                        {isInlineDiffHelpOpen && (
+                          <div
+                            className="inline-diff-help-popover"
+                            id={inlineDiffHelpPopoverId}
+                            role="dialog"
+                            aria-modal="false"
+                          >
+                            <strong>Difference Quick Adjust</strong>
+                            <p>Adjust absolute difference threshold while listening.</p>
+                            <p>Difference detection picks how much change counts as a difference.</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <FRDifference
+                    compact
+                    musicBuffer={musicBufRef.current}
+                    irBuffer={irBuffer}
+                    sampleRate={sessionSampleRate}
+                    absMode={differenceAbsMode}
+                    onChangeAbsMode={setDifferenceAbsMode}
+                    thresholdDb={pendingDifferenceThresholdDb}
+                    onChangeThresholdDb={setPendingDifferenceThresholdDb}
+                    bandSoloEnabled={pendingSoloBandEnabled}
+                    onChangeBandSoloEnabled={setPendingSoloBandEnabled}
+                    bandMinHz={pendingSoloBandHz[0]}
+                    bandMaxHz={pendingSoloBandHz[1]}
+                    onChangeBandHz={(min: number, max: number) => setPendingSoloBandHz([min, max])}
+                    bandMatchRmsEnabled={pendingBandMatchRmsEnabled}
+                    onChangeBandMatchRmsEnabled={setPendingBandMatchRmsEnabled}
+                  />
+                  <div className="inline-diff-actions">
+                    <button
+                      type="button"
+                      className="control-button button-ghost"
+                      onClick={applyDifferenceThreshold}
+                      disabled={!differenceControlsDirty || isResidualComputing}
+                    >
+                      {isResidualComputing ? "Applying..." : "Apply Threshold"}
+                    </button>
+                    <button
+                      type="button"
+                      className="control-button button-ghost"
+                      onClick={resetDifferenceThreshold}
+                      disabled={!differenceControlsDirty || isResidualComputing}
+                    >
+                      Reset
+                    </button>
+                    <div className="inline-diff-status" aria-live="polite">
+                      {differenceControlsDirty && !isResidualComputing && "Pending changes"}
+                      {isResidualComputing && "Updating difference..."}
+                    </div>
                   </div>
                 </div>
-                <FRDifference
-                  compact
-                  musicBuffer={musicBufRef.current}
-                  irBuffer={irBuffer}
-                  sampleRate={sessionSampleRate}
-                  absMode={differenceAbsMode}
-                  onChangeAbsMode={setDifferenceAbsMode}
-                  thresholdDb={pendingDifferenceThresholdDb}
-                  onChangeThresholdDb={setPendingDifferenceThresholdDb}
-                  bandSoloEnabled={pendingSoloBandEnabled}
-                  onChangeBandSoloEnabled={setPendingSoloBandEnabled}
-                  bandMinHz={pendingSoloBandHz[0]}
-                  bandMaxHz={pendingSoloBandHz[1]}
-                  onChangeBandHz={(min, max) => setPendingSoloBandHz([min, max])}
-                />
-                <div className="inline-diff-actions">
-                  <button
-                    type="button"
-                    className="control-button button-ghost"
-                    onClick={applyDifferenceThreshold}
-                    disabled={!differenceControlsDirty || isResidualComputing}
-                  >
-                    {isResidualComputing ? "Applying..." : "Apply Threshold"}
-                  </button>
-                  <button
-                    type="button"
-                    className="control-button button-ghost"
-                    onClick={resetDifferenceThreshold}
-                    disabled={!differenceControlsDirty || isResidualComputing}
-                  >
-                    Reset
-                  </button>
-                  <div className="inline-diff-status" aria-live="polite">
-                    {differenceControlsDirty && !isResidualComputing && "Pending changes"}
-                    {isResidualComputing && "Updating difference..."}
-                  </div>
-                </div>
-              </div>
+              )}
             </section>
+
+            <BlindTestPanel
+              mode={blindTestMode}
+              onChangeMode={handleBlindModeChange}
+              availableModes={availableBlindModes}
+              onStart={handleBlindStart}
+              onReset={handleBlindReset}
+              onReveal={handleBlindReveal}
+              onNext={handleBlindNext}
+              onGuess={handleBlindGuess}
+              onAudition={handleBlindAudition}
+              canAuditionC={hasIrC}
+              stats={blindStats}
+              currentTrialIndex={blindCurrentIndex}
+              lastLogEntry={blindLastEntry}
+              seed={blindTestSeed}
+              onSeedChange={handleBlindSeedChange}
+              isLatencyLocked={isLatencyLocked}
+              isBandTrimPending={isBandTrimComputing}
+              seedHash={seedFingerprint}
+              bandRangeLabel={blindPanelBandLabel}
+              pathInfo={pathMetrics}
+            />
 
             <ExportBar
               renderAndExport={renderAndExport}
@@ -1244,20 +2435,12 @@ Playback RMS gain set to ${clamped.toFixed(2)}x.`);
               onChangeBandSoloEnabled={setPendingSoloBandEnabled}
               bandMinHz={pendingSoloBandHz[0]}
               bandMaxHz={pendingSoloBandHz[1]}
-              onChangeBandHz={(min, max) => setPendingSoloBandHz([min, max])}
+              onChangeBandHz={(min: number, max: number) => setPendingSoloBandHz([min, max])}
+              bandMatchRmsEnabled={pendingBandMatchRmsEnabled}
+              onChangeBandMatchRmsEnabled={setPendingBandMatchRmsEnabled}
             />
           </section>
-        ) : (
-          <section className="panel frpink-panel">
-            <div className="panel-header">
-              <div>
-                <h2 className="panel-title">FR (Pink Noise)</h2>
-                <p className="panel-desc">Visualise the response of the loaded impulse against pink noise.</p>
-              </div>
-            </div>
-            <FRPink irBuffer={irBuffer} sampleRate={sessionSampleRate} label="A" />
-          </section>
-        )}
+        ) : null}
 
         <p className="footnote">
           Notes: Playback uses Web Audio. Rendering uses OfflineAudioContext. RMS matched before export.
@@ -1589,3 +2772,5 @@ function audioBufferToWav(buf: AudioBuffer, bitDepth: 16 | 24 | 32 = 16): ArrayB
 function writeStr(view: DataView, offset: number, s: string) {
   for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
 }
+
+
