@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useReducer, useRef } from "react";
+﻿import { useCallback, useMemo, useReducer, useRef } from "react";
 import type { BandSettings } from "./bandPassFactory";
 import type { BasePath as AuditionBasePath } from "./BandAuditionRouter";
 
