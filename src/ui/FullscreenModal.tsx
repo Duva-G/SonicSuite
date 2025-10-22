@@ -5,6 +5,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 
 type Props = {
   isOpen: boolean;
@@ -67,7 +68,7 @@ export default function FullscreenModal({
     }
   };
 
-  return (
+  return createPortal(
     <div
       className="fullscreen-modal"
       role="presentation"
@@ -97,11 +98,14 @@ export default function FullscreenModal({
           </button>
         </div>
         <div
-          className={`fullscreen-modal__body${bodyClassName ? ` ${bodyClassName}` : ""}`}
+          className={`fullscreen-modal__body${
+            bodyClassName ? ` ${bodyClassName}` : ""
+          }`}
         >
           {children}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

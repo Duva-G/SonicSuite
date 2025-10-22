@@ -10,7 +10,6 @@ import {
 import Plotly from "plotly.js-dist-min";
 import createPlotlyComponent from "react-plotly.js/factory";
 import { createModuleWorker } from "../utils/workerSupport";
-import FullscreenModal from "./FullscreenModal";
 
 type SmoothingMode = "1/24" | "1/12" | "1/6" | "1/3";
 
@@ -192,7 +191,6 @@ export default function FRMusicPink({ musicBuffer, sampleRate }: Props) {
   const [smoothing, setSmoothing] = useState<SmoothingMode>("1/6");
   const [showDifference, setShowDifference] = useState(false);
   const [pinkOffsetDb, setPinkOffsetDb] = useState(0);
-  const [isFullscreenOpen, setIsFullscreenOpen] = useState(false);
   const [playbackSpectra, setPlaybackSpectra] = useState<PlaybackSpectra | null>(null);
   const [pinkSpectra, setPinkSpectra] = useState<PinkSpectra | null>(null);
   const [isLoading, setLoading] = useState(false);
@@ -442,19 +440,13 @@ export default function FRMusicPink({ musicBuffer, sampleRate }: Props) {
   useEffect(() => {
     setLayout((prev: PlotLayout) => {
       const nextMargin = { ...(prev.margin ?? {}) };
-      nextMargin.l = isFullscreenOpen ? 72 : 58;
-      nextMargin.r = isFullscreenOpen ? 72 : 58;
-      nextMargin.t = isFullscreenOpen
-        ? showDifference
-          ? 70
-          : 60
-        : showDifference
-        ? 78
-        : 68;
-      nextMargin.b = isFullscreenOpen ? 76 : 64;
+      nextMargin.l = 58;
+      nextMargin.r = 58;
+      nextMargin.t = showDifference ? 78 : 68;
+      nextMargin.b = 64;
 
       const nextLegend = { ...(prev.legend ?? {}) };
-      nextLegend.y = isFullscreenOpen ? 1.06 : 1.12;
+      nextLegend.y = 1.12;
       nextLegend.x = 0;
       nextLegend.xanchor = "left";
       nextLegend.orientation = "h";
@@ -468,7 +460,7 @@ export default function FRMusicPink({ musicBuffer, sampleRate }: Props) {
         legend: nextLegend,
       };
     });
-  }, [isFullscreenOpen, showDifference]);
+  }, [showDifference]);
 
   const traces = useMemo<PlotDataArray>(() => {
     if (!dataset) return [] as PlotDataArray;
@@ -559,34 +551,6 @@ export default function FRMusicPink({ musicBuffer, sampleRate }: Props) {
     });
   };
 
-  const handleExportCsv = () => {
-    if (!dataset) return;
-    const pinkValues = adjustedPink ?? dataset.pinkDb;
-    const diffValues =
-      diffSeries ?? dataset.musicDb.map((value, idx) => value - pinkValues[idx]);
-    const rows: string[] = ["frequency_hz,music_db,pink_db,diff_db"];
-    rows.push(`# pink_offset_db=${pinkOffsetDb.toFixed(2)}`);
-    for (let i = 0; i < dataset.freqs.length; i++) {
-      rows.push(
-        [
-          dataset.freqs[i].toFixed(2),
-          dataset.musicDb[i]?.toFixed(4) ?? "",
-          pinkValues[i]?.toFixed(4) ?? "",
-          diffValues[i]?.toFixed(4) ?? "",
-        ].join(",")
-      );
-    }
-    const blob = new Blob([rows.join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `fr-music-pink-${Date.now()}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
   const hasMusic = Boolean(musicBuffer);
   const hasData = Boolean(dataset);
   const basePlotStyle = useMemo(
@@ -638,24 +602,6 @@ export default function FRMusicPink({ musicBuffer, sampleRate }: Props) {
             onReset={handleOffsetReset}
             disabled={!hasData}
           />
-          <div className="frpink-actions">
-            <button
-              type="button"
-              className="control-button button-ghost frpink-export"
-              onClick={handleExportCsv}
-              disabled={!hasData}
-            >
-              Export CSV
-            </button>
-            <button
-              type="button"
-              className="control-button button-ghost frpink-fullscreen"
-              onClick={() => setIsFullscreenOpen(true)}
-              disabled={!hasData}
-            >
-              Full screen
-            </button>
-          </div>
         </div>
 
         {error && <div className="frpink-message frpink-message--error">{error}</div>}
@@ -688,43 +634,6 @@ export default function FRMusicPink({ musicBuffer, sampleRate }: Props) {
           )}
         </div>
       </div>
-
-      <FullscreenModal
-        isOpen={isFullscreenOpen}
-        onClose={() => setIsFullscreenOpen(false)}
-        title="Spectrum vs Pink"
-        size="wide"
-        bodyClassName="fullscreen-modal__body--stretch"
-      >
-        <div className="frpink-modal">
-          <PinkOffsetControl
-            value={pinkOffsetDb}
-            min={PINK_OFFSET_MIN}
-            max={PINK_OFFSET_MAX}
-            step={PINK_OFFSET_STEP}
-            onChange={handleOffsetChange}
-            onStep={handleOffsetStep}
-            onReset={handleOffsetReset}
-            disabled={!hasData}
-            variant="modal"
-          />
-          <div className="fullscreen-modal__plot frpink-modal__plot">
-            {hasData ? (
-              <Plot
-                data={traces}
-                layout={layout}
-                config={config}
-                useResizeHandler
-                style={{ width: "100%", height: "100%" }}
-                onRelayout={handleRelayout}
-                onAfterPlot={handleAfterPlot}
-              />
-            ) : (
-              <div className="frpink-message">Load a music track to view the spectrum.</div>
-            )}
-          </div>
-        </div>
-      </FullscreenModal>
     </>
   );
 }
