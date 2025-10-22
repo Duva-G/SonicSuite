@@ -2,10 +2,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { downsample } from "../audio/downsample";
 import type { DownsampleInput, DownsampleOutput } from "../audio/downsample";
+type WaveformMode = "A" | "B" | "diff";
+type OverlayTrace = {
+  label: string;
+  times: Float32Array;
+  samples: Float32Array;
+  color: string;
+  opacity?: number;
+  dash?: "solid" | "dot" | "dash" | "dashdot";
+};
+type Region = {
+  start: number;
+  end: number;
+};
 type Props = {
   buffer: AudioBuffer;
   color: string;
   title: string;
+  mode?: WaveformMode;
+  overlayTraces?: OverlayTrace[];
+  regions?: Region[];
 };
 type ChannelColor = {
   stroke: string;
@@ -79,7 +95,14 @@ function computeAutoYExtent(peak: number) {
   return padded > MIN_VISIBLE_Y_EXTENT ? padded : MIN_VISIBLE_Y_EXTENT;
 }
 
-export default function WaveformPlot({ buffer, color, title }: Props) {
+export default function WaveformPlot({
+  buffer,
+  color,
+  title,
+  mode = "A",
+  overlayTraces,
+  regions,
+}: Props) {
   const baseChannelCount = resolveChannelCount(buffer);
   const [downsampled, setDownsampled] = useState<DownsampleOutput>(() =>
     createEmptyDownsample(baseChannelCount),
@@ -243,46 +266,95 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
       return `Channel ${idx + 1}`;
     });
   }, [channelCount, title]);
+  const isDiffMode = mode === "diff";
+  const paletteSeed = isDiffMode ? "#ff375f" : color;
   const channelColors = useMemo(
-    () => deriveIosChannelPalette(color, channelCount),
-    [color, channelCount],
+    () => deriveIosChannelPalette(paletteSeed, channelCount),
+    [paletteSeed, channelCount],
   );
-  const data = useMemo(
+  const baseTraces = useMemo(
     () =>
       channelSamples.map((samples, idx) => {
         const label = channelLabels[idx] ?? `Channel ${idx + 1}`;
         const colorForChannel =
           channelColors[idx] ??
           IOS_FALLBACK_PALETTE[idx % IOS_FALLBACK_PALETTE.length];
+        const traceName =
+          channelCount > 1 ? `${label}${isDiffMode ? " (diff)" : ""}` : title;
         return {
           type: "scatter" as const,
           mode: "lines",
-          name: channelCount > 1 ? `${label}` : title,
+          name: traceName,
           line: {
             color: colorForChannel.stroke,
-            width: 2.4,
+            width: isDiffMode ? 2.8 : 2.4,
             shape: "spline",
             smoothing: 0.58,
+            dash: isDiffMode ? "solid" : undefined,
           },
           fill: "tozeroy" as const,
           fillcolor: colorForChannel.fill,
-          opacity: channelCount > 1 ? 0.95 : 1,
+          opacity: isDiffMode ? 1 : channelCount > 1 ? 0.95 : 1,
           hovertemplate: `<b>${label}</b><br><b>%{x:.3f}s</b><br>Amplitude: %{y:.6f}<extra></extra>`,
           x: times,
           y: samples,
         };
       }),
-    [channelSamples, channelCount, channelColors, channelLabels, times, title],
+    [channelSamples, channelCount, channelColors, channelLabels, isDiffMode, times, title],
   );
+  const overlays = useMemo(() => {
+    if (!overlayTraces || overlayTraces.length === 0) return [];
+    return overlayTraces.map((overlay) => ({
+      type: "scatter" as const,
+      mode: "lines",
+      name: overlay.label,
+      line: {
+        color: overlay.color,
+        width: 1.6,
+        dash: overlay.dash ?? "dot",
+        shape: "spline",
+        smoothing: 0.5,
+      },
+      opacity: overlay.opacity ?? 0.6,
+      hovertemplate: `<b>${overlay.label}</b><br><b>%{x:.3f}s</b><br>%{y:.6f}<extra></extra>`,
+      x: overlay.times,
+      y: overlay.samples,
+      fill: "none" as const,
+      fillcolor: "rgba(0,0,0,0)",
+    }));
+  }, [overlayTraces]);
+  const data = useMemo(() => [...baseTraces, ...overlays], [baseTraces, overlays]);
   const layout = useMemo(() => {
     const safeXExtent = xExtent > 0 && Number.isFinite(xExtent) ? xExtent : DEFAULT_AXIS_EXTENT;
     const safeYExtent =
       yExtent > 0 && Number.isFinite(yExtent)
-        ? Math.max(yExtent, MIN_VISIBLE_Y_EXTENT)
-        : DEFAULT_AXIS_EXTENT;
+        ? yExtent
+        : computeAutoYExtent(peak);
+    const regionShapes =
+      regions && regions.length > 0
+        ? regions
+            .filter(
+              (region) =>
+                Number.isFinite(region.start) &&
+                Number.isFinite(region.end) &&
+                region.end > region.start,
+            )
+            .map((region) => ({
+              type: "rect" as const,
+              xref: "x",
+              yref: "paper",
+              x0: region.start,
+              x1: region.end,
+              y0: 0,
+              y1: 1,
+              fillcolor: "rgba(255, 69, 58, 0.12)",
+              line: { width: 0 },
+              layer: "below" as const,
+            }))
+        : undefined;
     return {
       autosize: true,
-      height: 220,
+      height: 420,
       margin: { t: 36, r: 26, l: 56, b: 44 },
       paper_bgcolor: "rgba(17, 17, 21, 0.78)",
       plot_bgcolor: "rgba(11, 11, 15, 0.62)",
@@ -297,7 +369,7 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
         font: { color: "#f9f9ff" },
       },
       hovermode: "x unified",
-      showlegend: channelCount > 1,
+      showlegend: channelCount > 1 || overlays.length > 0,
       legend: {
         orientation: "h" as const,
         x: 0,
@@ -345,8 +417,9 @@ export default function WaveformPlot({ buffer, color, title }: Props) {
         linecolor: "rgba(255, 255, 255, 0.18)",
         mirror: true,
       },
+      shapes: regionShapes,
     };
-  }, [channelCount, xExtent, yExtent]);
+  }, [channelCount, overlays, xExtent, yExtent, regions, peak]);
   const config = useMemo(
     () => ({
       responsive: true,
