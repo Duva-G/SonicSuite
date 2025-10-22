@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import FileInputs from "./ui/FileInputs";
 import Transport from "./ui/Transport";
 import ModeBar from "./ui/ModeBar";
@@ -13,7 +13,7 @@ import BandAuditionRouter, { type AuditionPath, type BasePath } from "./audio/Ba
 import type { BandSettings } from "./audio/bandPassFactory";
 import type { LatencySecondsMap } from "./audio/LatencyCompensator";
 import { computeBandTrims, type TrimResult } from "./audio/BandLevelMatcher";
-import { useAbcxController, type BlindTestMode, hashSeed } from "./audio/ABCXController";
+import { useAbcxController, type BlindTestMode } from "./audio/ABCXController";
 import BlindTestPanel from "./ui/BlindTestPanel";
 import {
   BAND_PRESETS,
@@ -77,6 +77,32 @@ const FULL_PLAYBACK_BAND: [number, number] = [PLAYBACK_BAND_MIN_HZ, PLAYBACK_BAN
 const MODE_BASE_PATH: Record<Exclude<Mode, "difference">, AuditionPath> = {
   original: "A",
   convolved: "B",
+};
+
+const BLIND_MODE_LABEL: Record<BlindTestMode, string> = {
+  ABX: "OAX",
+  ACX: "OBX",
+  BCX: "ABX",
+  ABCX: "OABX",
+};
+const BLIND_PATH_LETTER: Record<BasePath, string> = {
+  A: "O",
+  B: "A",
+  C: "B",
+};
+
+const BLIND_PATH_NAME: Record<BasePath, string> = {
+  A: "Music WAV",
+  B: "Impulse response WAV",
+  C: "Impulse response C",
+};
+
+const formatBlindModeLabel = (mode: BlindTestMode): string => BLIND_MODE_LABEL[mode] ?? mode;
+
+const formatBlindPathLabel = (path: BasePath): string => {
+  const letter = BLIND_PATH_LETTER[path] ?? path;
+  const name = BLIND_PATH_NAME[path];
+  return name ? `${letter} (${name})` : letter;
 };
 
 const FULL_RANGE_TOLERANCE_HZ = 0.5;
@@ -218,7 +244,6 @@ function SonicSuiteApp() {
   } | null>(null);
 
   const [bandTrimResult, setBandTrimResult] = useState<TrimResult | null>(null);
-  const [isBandTrimComputing, setBandTrimComputing] = useState(false);
 
   const getModeDuration = useCallback((playbackMode: Mode = mode): number => {
     const musicDuration = musicBufRef.current?.duration ?? 0;
@@ -329,14 +354,6 @@ function SonicSuiteApp() {
 
   const blindLastEntry = blindTrials.length > 0 ? blindTrials[blindTrials.length - 1] : null;
   const blindCurrentIndex = blindCurrent ? blindCurrent.index : null;
-  const isLatencyLocked = isBandFrozen;
-
-  const seedFingerprint = useMemo(() => {
-    const normalized = blindTestSeed.trim();
-    if (!normalized) return "00000000";
-    const hashed = hashSeed(normalized);
-    return hashed.toString(16).padStart(8, "0");
-  }, [blindTestSeed]);
 
   const bandTrimB = bandMatchRmsEnabled ? bandTrimResult?.trims.B ?? 1 : 1;
   const bandTrimC = bandMatchRmsEnabled ? bandTrimResult?.trims.C ?? 1 : 1;
@@ -383,13 +400,13 @@ function SonicSuiteApp() {
   }, [formattedKPerCh]);
 
 
-  function ensureCtx(): AudioContext {
+  const ensureCtx = useCallback((): AudioContext => {
     if (!audioCtxRef.current) {
       audioCtxRef.current = new AudioContext();
       setSessionSampleRate(audioCtxRef.current.sampleRate);
     }
     return audioCtxRef.current;
-  }
+  }, [setSessionSampleRate]);
 
   async function decodeFile(file: File): Promise<AudioBuffer> {
     const ctx = ensureCtx();
@@ -516,7 +533,7 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
     await loadIrSlot("C", file);
   }
 
-  function teardownGraph() {
+  const teardownGraph = useCallback(() => {
     if (srcRef.current) {
       srcRef.current.onended = null;
     }
@@ -539,9 +556,9 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
     matchGainCRef.current = null;
     gainRef.current = null;
     auditionRouterRef.current = null;
-  }
+  }, []);
 
-  function makeGraph(at: number, playbackMode: Mode = mode) {
+  const makeGraph = useCallback((at: number, playbackMode: Mode = mode) => {
     const ctx = ensureCtx();
     const usingBandScope = bandScopeEngaged;
     const isDifferenceMode = playbackMode === "difference";
@@ -825,7 +842,34 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
     } else {
       startPlayback();
     }
-  }
+  }, [
+    bandCVol,
+    bandMatchRmsEnabled,
+    bandScopeEngaged,
+    bandTrimResult,
+    convolvedCMatchGain,
+    convolvedMatchGain,
+    convolvedVol,
+    differencePath,
+    differenceVol,
+    ensureCtx,
+    hasIrB,
+    hasIrC,
+    isFullRangeBand,
+    latencySamples,
+    mode,
+    originalVol,
+    playbackBandMaxHz,
+    playbackBandMinHz,
+    resolveModePath,
+    sessionSampleRate,
+    setDifferencePath,
+    setFrozenDifferencePath,
+    setPlaybackPosition,
+    setPlaying,
+    setStatus,
+    teardownGraph,
+  ]);
 
   makeGraphRef.current = makeGraph;
 
@@ -957,18 +1001,16 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
       return;
     }
     if (!hasIrB) {
-      setStatus((prev) => `${prev}\nLoad IR-B to start blind testing.`);
+      setStatus((prev) => `${prev}\nLoad IR-B (path ${formatBlindPathLabel("B")}) before starting blind testing.`);
       return;
     }
     if ((blindTestMode === "ACX" || blindTestMode === "BCX" || blindTestMode === "ABCX") && !hasIrC) {
-      setStatus((prev) => `${prev}\nLoad IR-C to use ${blindTestMode}.`);
+      setStatus(
+        (prev) =>
+          `${prev}\nLoad IR-C (path ${formatBlindPathLabel("C")}) to use ${formatBlindModeLabel(blindTestMode)}.`,
+      );
       return;
     }
-    if (!isBandActive) {
-      setStatus((prev) => `${prev}\nSelect a playback band before starting a blind test.`);
-      return;
-    }
-
     const sanitizedSeed = blindTestSeed.trim() || Date.now().toString(36);
     if (sanitizedSeed !== blindTestSeed) {
       setBlindTestSeed(sanitizedSeed);
@@ -1028,7 +1070,10 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
       auditionRouterRef.current.updateLatencies(latencies);
     }
 
-    setStatus((prev) => `${prev}\nBlind test prepared (mode ${blindTestMode}, seed ${sanitizedSeed}).`);
+    setStatus(
+      (prev) =>
+        `${prev}\nBlind test prepared (mode ${formatBlindModeLabel(blindTestMode)}, seed ${sanitizedSeed}).`,
+    );
   }, [
     auditionRouterRef,
     bandCVol,
@@ -1063,7 +1108,7 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
   const handleBlindReveal = useCallback(() => {
     const actual = revealBlindChoice();
     if (actual) {
-      setStatus((prev) => `${prev}\nReveal: X was ${actual}.`);
+      setStatus((prev) => `${prev}\nReveal: X was ${formatBlindPathLabel(actual)}.`);
     }
   }, [revealBlindChoice, setStatus]);
 
@@ -1075,8 +1120,10 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
     (choice: BasePath) => {
       const outcome = makeBlindChoice(choice);
       if (outcome) {
+        const guessLabel = formatBlindPathLabel(choice);
+        const actualLabel = formatBlindPathLabel(outcome.actual);
         setStatus((prev) =>
-          `${prev}\nGuess ${choice}: ${outcome.correct ? "correct" : "incorrect"} (X was ${outcome.actual}).`,
+          `${prev}\nGuess ${guessLabel}: ${outcome.correct ? "correct" : "incorrect"} (X was ${actualLabel}).`,
         );
       }
     },
@@ -1086,11 +1133,11 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
   const handleBlindAudition = useCallback(
     (target: "A" | "B" | "C" | "X") => {
       if (target === "B" && !hasIrB) {
-        setStatus((prev) => `${prev}\nLoad IR-B to audition path B.`);
+        setStatus((prev) => `${prev}\nLoad IR-B to audition path ${formatBlindPathLabel("B")}.`);
         return;
       }
       if (target === "C" && !hasIrC) {
-        setStatus((prev) => `${prev}\nLoad IR-C to audition path C.`);
+        setStatus((prev) => `${prev}\nLoad IR-C to audition path ${formatBlindPathLabel("C")}.`);
         return;
       }
       if (!bandScopeEngaged) {
@@ -1110,8 +1157,12 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
       if (router) {
         router.setActive(actualPath);
       }
+
+      if (!isPlaying) {
+        makeGraph(startOffsetRef.current, mode);
+      }
     },
-    [auditionRouterRef, bandScopeEngaged, blindCurrent, hasIrB, hasIrC, setStatus],
+    [auditionRouterRef, bandScopeEngaged, blindCurrent, hasIrB, hasIrC, isPlaying, makeGraph, mode, setStatus],
   );
 
   function setPlaybackBandRange(minHz: number, maxHz: number) {
@@ -1360,6 +1411,7 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
     isPlaying,
     mode,
     computeResidualWithWorker,
+    teardownGraph,
   ]);
 
   useEffect(() => {
@@ -1402,11 +1454,9 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
     const bandActive = bandScopeEngaged;
     if (!music || (!irB && !irC) || !bandActive || !bandMatchRmsEnabled) {
       setBandTrimResult(null);
-      setBandTrimComputing(false);
       return;
     }
     let cancelled = false;
-    setBandTrimComputing(true);
     const bandSettings: BandSettings = {
       enabled: isBandActive,
       minHz: playbackBandMinHz,
@@ -1426,11 +1476,6 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
         console.warn("Band trim computation failed", err);
         if (!cancelled) {
           setBandTrimResult(null);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setBandTrimComputing(false);
         }
       });
     return () => {
@@ -1495,7 +1540,7 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
       if (auditionRouterRef.current) {
         auditionRouterRef.current.setActive("A");
       }
-      setStatus((prev) => `${prev}\nPlayback path reset to A; required impulse response missing.`);
+      setStatus((prev) => `${prev}\nPlayback path reset to O; required impulse response missing.`);
     }
   }, [bandScopeEngaged, hasIrB, irBuffer, irCBuffer, irCOriginal, irCName, setStatus]);
 
@@ -1578,7 +1623,7 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
     if (typeof makeGraphFn === "function") {
       makeGraphFn(resumeAt, mode);
     }
-  }, [getModeDuration, isPlaying, mode, playbackBandMinHz, playbackBandMaxHz]);
+  }, [getModeDuration, isPlaying, mode, playbackBandMinHz, playbackBandMaxHz, teardownGraph]);
 
   useEffect(() => {
     const { worker, error } = createModuleWorker(new URL("./workers/residualWorker.ts", import.meta.url));
@@ -2391,11 +2436,8 @@ ${message}`);
               lastLogEntry={blindLastEntry}
               seed={blindTestSeed}
               onSeedChange={handleBlindSeedChange}
-              isLatencyLocked={isLatencyLocked}
-              isBandTrimPending={isBandTrimComputing}
-              seedHash={seedFingerprint}
               bandRangeLabel={blindPanelBandLabel}
-              pathInfo={pathMetrics}
+              isReady={isBandFrozen}
             />
 
             <ExportBar

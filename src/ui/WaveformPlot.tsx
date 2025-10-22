@@ -54,6 +54,7 @@ const DEFAULT_AXIS_EXTENT = 1;
 const MIN_VISIBLE_Y_EXTENT = 1e-6;
 const Y_EXTENT_PADDING = 1.05;
 const Y_EXTENT_EPSILON = 1e-9;
+const DEFAULT_LAYOUT_HEIGHT = 320;
 function createEmptyDownsample(channelCount = 0): DownsampleOutput {
   return {
     times: new Float32Array(0),
@@ -354,6 +355,7 @@ export default function WaveformPlot({
         : undefined;
     return {
       autosize: true,
+      height: DEFAULT_LAYOUT_HEIGHT,
       margin: { t: 24, r: 18, l: 42, b: 28 },
       paper_bgcolor: "rgba(17, 17, 21, 0.78)",
       plot_bgcolor: "rgba(11, 11, 15, 0.62)",
