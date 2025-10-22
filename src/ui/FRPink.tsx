@@ -291,38 +291,6 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
     []
   );
 
-  function handleExportCsv() {
-    if (!spectra) return;
-    const rows: string[] = ["frequency_hz,pink_db,convolved_db,transfer_db"];
-    const len = spectra.freqs.length;
-    const hasConv = Boolean(spectra.convolvedDb);
-    const hasTransfer = Boolean(spectra.transferDb);
-    for (let i = 0; i < len; i++) {
-      const f = spectra.freqs[i];
-      const pink = spectra.pinkDb[i];
-      const conv = hasConv ? spectra.convolvedDb![i] : null;
-      const tf = hasTransfer ? spectra.transferDb![i] : null;
-      rows.push(
-        [
-          f.toFixed(2),
-          pink.toFixed(4),
-          conv != null ? conv.toFixed(4) : "",
-          tf != null ? tf.toFixed(4) : "",
-        ].join(",")
-      );
-    }
-
-    const blob = new Blob([rows.join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `fr-pink-${Date.now()}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  }
-
   return (
     <div className="frpink">
       <div className="frpink-controls">
@@ -354,14 +322,6 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
           />
           <span>Show transfer function (pink&gt;IR / pink)</span>
         </label>
-        <button
-          type="button"
-          className="control-button button-ghost frpink-export"
-          onClick={handleExportCsv}
-          disabled={!spectra}
-        >
-          Export CSV
-        </button>
       </div>
 
       {error && <div className="frpink-message frpink-message--error">{error}</div>}

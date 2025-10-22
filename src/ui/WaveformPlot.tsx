@@ -354,8 +354,7 @@ export default function WaveformPlot({
         : undefined;
     return {
       autosize: true,
-      height: 420,
-      margin: { t: 36, r: 26, l: 56, b: 44 },
+      margin: { t: 24, r: 18, l: 42, b: 28 },
       paper_bgcolor: "rgba(17, 17, 21, 0.78)",
       plot_bgcolor: "rgba(11, 11, 15, 0.62)",
       font: {
@@ -373,7 +372,8 @@ export default function WaveformPlot({
       legend: {
         orientation: "h" as const,
         x: 0,
-        y: 1.12,
+        y: 1.02,
+        yanchor: "bottom" as const,
         bgcolor: "rgba(20, 20, 26, 0.78)",
         bordercolor: "rgba(255, 255, 255, 0.14)",
         borderwidth: 1,
@@ -430,7 +430,7 @@ export default function WaveformPlot({
       toImageButtonOptions: {
         format: "png" as const,
         filename: "waveform",
-        height: 420,
+        height: 340,
         width: 1200,
         scale: 2,
       },
@@ -499,7 +499,7 @@ export default function WaveformPlot({
       layout={layout}
       config={config}
       useResizeHandler
-      style={{ width: "100%", height: "100%", minHeight: 220 }}
+      style={{ width: "100%", height: "100%" }}
     />
   );
 }
