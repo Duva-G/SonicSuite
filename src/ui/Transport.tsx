@@ -11,6 +11,9 @@ type Props = {
   onChangeConvolvedVol: (v: number) => void;
   differenceVol: number;
   onChangeDifferenceVol: (v: number) => void;
+  isBandAudition: boolean;
+  bandCVol?: number;
+  onChangeBandCVol?: (v: number) => void;
   duration: number;
   position: number;
   onSeek: (seconds: number) => void;
@@ -80,6 +83,9 @@ export default function Transport({
   onChangeConvolvedVol,
   differenceVol,
   onChangeDifferenceVol,
+  isBandAudition,
+  bandCVol,
+  onChangeBandCVol,
   duration,
   position,
   onSeek,
@@ -132,6 +138,12 @@ export default function Transport({
     return Math.round(db * 10) / 10;
   }, [differenceVol]);
 
+  const bandCVolDb = useMemo(() => {
+    if (typeof bandCVol !== "number") return null;
+    const db = linearToDbWithRange(bandCVol, ORIGCONV_DB_MIN, ORIGCONV_DB_MAX);
+    return Math.round(db * 10) / 10;
+  }, [bandCVol]);
+
   const originalVolumeStyle = useMemo<VolumeSliderStyle>(() => {
     const progress = ((originalVolDb - ORIGCONV_DB_MIN) / ORIGCONV_DB_RANGE) * 100;
     const bounded = clamp(progress, 0, 100);
@@ -150,8 +162,19 @@ export default function Transport({
     return { "--volume-progress": `${bounded}%` };
   }, [differenceVolDb]);
 
+  const bandCVolumeStyle = useMemo<VolumeSliderStyle | undefined>(() => {
+    if (bandCVolDb === null) return undefined;
+    const progress = ((bandCVolDb - ORIGCONV_DB_MIN) / ORIGCONV_DB_RANGE) * 100;
+    const bounded = clamp(progress, 0, 100);
+    return { "--volume-progress": `${bounded}%` };
+  }, [bandCVolDb]);
+
   const originalVolumeTone = useMemo(() => getVolumeTone(originalVolDb), [originalVolDb]);
   const convolvedVolumeTone = useMemo(() => getVolumeTone(convolvedVolDb), [convolvedVolDb]);
+  const bandCVolumeTone = useMemo<VolumeTone>(() => {
+    if (bandCVolDb === null) return "neutral";
+    return getVolumeTone(bandCVolDb);
+  }, [bandCVolDb]);
 
   const handleScrubStart = () => {
     if (!isReady) return;
@@ -299,7 +322,7 @@ export default function Transport({
         </label>
 
         <label className="volume-control">
-          <span className="volume-label">Convolved Volume</span>
+          <span className="volume-label">{isBandAudition ? "IR-B Volume" : "Convolved Volume"}</span>
           <div className="volume-slider">
             <input
               className="volume-slider__input"
@@ -329,6 +352,40 @@ export default function Transport({
             </span>
           </div>
         </label>
+
+        {isBandAudition && typeof bandCVol === "number" && onChangeBandCVol && (
+          <label className="volume-control">
+            <span className="volume-label">IR-C Volume</span>
+            <div className="volume-slider">
+              <input
+                className="volume-slider__input"
+                type="range"
+                min={ORIGCONV_DB_MIN}
+                max={ORIGCONV_DB_MAX}
+                step={0.1}
+                value={bandCVolDb ?? 0}
+                onChange={(event) =>
+                  onChangeBandCVol(
+                    dbToLinearWithRange(Number(event.target.value), ORIGCONV_DB_MIN, ORIGCONV_DB_MAX),
+                  )
+                }
+                aria-valuemin={ORIGCONV_DB_MIN}
+                aria-valuemax={ORIGCONV_DB_MAX}
+                aria-valuenow={bandCVolDb ?? 0}
+                aria-valuetext={formatDb(bandCVolDb ?? 0)}
+                style={bandCVolumeStyle}
+              />
+              <div className="volume-slider__labels" aria-hidden="true">
+                <span>-6 dB</span>
+                <span>0 dB</span>
+                <span>+6 dB</span>
+              </div>
+              <span className={`volume-value volume-value--${bandCVolumeTone}`}>
+                {formatDb(bandCVolDb ?? 0)}
+              </span>
+            </div>
+          </label>
+        )}
 
         <label className="volume-control">
           <span className="volume-label">Difference Volume</span>

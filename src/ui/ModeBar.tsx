@@ -1,4 +1,4 @@
-export type Mode = "original" | "convolved" | "difference";
+﻿export type Mode = "original" | "convolved" | "difference";
 
 type Props = {
   mode: Mode;
