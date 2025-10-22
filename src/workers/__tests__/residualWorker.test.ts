@@ -7,22 +7,25 @@ type MockWorkerScope = {
   postMessage: (...args: unknown[]) => void;
 };
 
-const globalWithSelf = globalThis as typeof globalThis & { self?: MockWorkerScope };
-
 let computeResidual: ComputeResidualFn;
 
 beforeAll(async () => {
-  globalWithSelf.self = {
+  const mockSelf: MockWorkerScope = {
     addEventListener() {},
     removeEventListener() {},
     postMessage() {},
   };
+  Object.defineProperty(globalThis, "self", {
+    configurable: true,
+    writable: true,
+    value: mockSelf,
+  });
   const module = await import("../residualWorker");
   computeResidual = module.__testComputeResidual;
 });
 
 afterAll(() => {
-  delete globalWithSelf.self;
+  Reflect.deleteProperty(globalThis, "self");
 });
 
 const createPayload = (wet: Float32Array, dry: Float32Array, gains?: Float32Array, offset = 0) => ({
