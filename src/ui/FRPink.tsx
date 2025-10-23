@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
 import Plotly from "plotly.js-dist-min";
 import createPlotlyComponent from "react-plotly.js/factory";
+import { createModuleWorker } from "../utils/workerSupport";
 
 type SmoothingMode = "1/12" | "1/6" | "1/3";
 
@@ -123,7 +124,15 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const worker = new Worker(new URL("../workers/dspWorker.ts", import.meta.url), { type: "module" });
+    const { worker, error } = createModuleWorker(new URL("../workers/dspWorker.ts", import.meta.url));
+    if (!worker) {
+      if (error) {
+        console.warn("Pink-noise analysis worker unavailable.", error);
+      }
+      setWorkerReady(false);
+      setError("Pink-noise analysis is unavailable in this browser (missing Web Worker support).");
+      return;
+    }
     workerRef.current = worker;
     setWorkerReady(true);
 
@@ -282,38 +291,6 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
     []
   );
 
-  function handleExportCsv() {
-    if (!spectra) return;
-    const rows: string[] = ["frequency_hz,pink_db,convolved_db,transfer_db"];
-    const len = spectra.freqs.length;
-    const hasConv = Boolean(spectra.convolvedDb);
-    const hasTransfer = Boolean(spectra.transferDb);
-    for (let i = 0; i < len; i++) {
-      const f = spectra.freqs[i];
-      const pink = spectra.pinkDb[i];
-      const conv = hasConv ? spectra.convolvedDb![i] : null;
-      const tf = hasTransfer ? spectra.transferDb![i] : null;
-      rows.push(
-        [
-          f.toFixed(2),
-          pink.toFixed(4),
-          conv != null ? conv.toFixed(4) : "",
-          tf != null ? tf.toFixed(4) : "",
-        ].join(",")
-      );
-    }
-
-    const blob = new Blob([rows.join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `fr-pink-${Date.now()}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  }
-
   return (
     <div className="frpink">
       <div className="frpink-controls">
@@ -345,14 +322,6 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
           />
           <span>Show transfer function (pink&gt;IR / pink)</span>
         </label>
-        <button
-          type="button"
-          className="control-button button-ghost frpink-export"
-          onClick={handleExportCsv}
-          disabled={!spectra}
-        >
-          Export CSV
-        </button>
       </div>
 
       {error && <div className="frpink-message frpink-message--error">{error}</div>}
