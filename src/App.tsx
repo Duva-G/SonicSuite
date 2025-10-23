@@ -62,8 +62,8 @@ type ResidualWorkerMessage = ResidualWorkerSuccess | ResidualWorkerFailure;
 
 const DEFAULT_SOLO_BAND: [number, number] = [20, 20000];
 
-type DifferencePath = "DeltaAB" | "DeltaAC" | "DeltaBC";
-const DIFFERENCE_PRIORITY: DifferencePath[] = ["DeltaAB", "DeltaAC", "DeltaBC"];
+type DifferenceMode = "origMinusA" | "origMinusB" | "aMinusB";
+const DIFFERENCE_PRIORITY: DifferenceMode[] = ["origMinusA", "origMinusB", "aMinusB"];
 
 const {
   MIN_FREQ: PLAYBACK_BAND_MIN_HZ,
@@ -76,7 +76,8 @@ const FULL_PLAYBACK_BAND: [number, number] = [PLAYBACK_BAND_MIN_HZ, PLAYBACK_BAN
 
 const MODE_BASE_PATH: Record<Exclude<Mode, "difference">, AuditionPath> = {
   original: "A",
-  convolved: "B",
+  convolvedA: "B",
+  convolvedB: "C",
 };
 
 const BLIND_MODE_LABEL: Record<BlindTestMode, string> = {
@@ -153,8 +154,13 @@ function SonicSuiteApp() {
   const [originalVol, setOriginalVol] = useState<number>(1.0);
   const [convolvedVol, setConvolvedVol] = useState<number>(1.0);
   const [differenceVol, setDifferenceVol] = useState<number>(1.0);
-  const [differencePath, setDifferencePath] = useState<DifferencePath>("DeltaAB");
-  const [frozenDifferencePath, setFrozenDifferencePath] = useState<DifferencePath | null>(null);
+  const [differencePath, setDifferencePath] = useState<DifferenceMode>("origMinusA");
+  const [frozenDifferencePath, setFrozenDifferencePath] = useState<DifferenceMode | null>(null);
+  const [rmsOffsetsDb, setRmsOffsetsDb] = useState<{ original: number; convolvedA: number; convolvedB: number }>(() => ({
+    original: 0,
+    convolvedA: 0,
+    convolvedB: 0,
+  }));
   const [playbackBandHz, setPlaybackBandHz] = useState<[number, number]>(() => [...FULL_PLAYBACK_BAND]);
   const [differenceThresholdDb, setDifferenceThresholdDb] = useState<number>(0);
   const [pendingDifferenceThresholdDb, setPendingDifferenceThresholdDb] = useState<number>(0);
@@ -186,7 +192,7 @@ function SonicSuiteApp() {
   const [irCOriginal, setIrCOriginal] = useState<AudioBuffer | null>(null);
   const [irCBuffer, setIrCBuffer] = useState<AudioBuffer | null>(null);
   const [convolvedCMatchGain, setConvolvedCMatchGain] = useState<number>(1);
-  const [, setConvolvedCGainMatched] = useState(false);
+  const [isConvolvedBGainMatched, setConvolvedBGainMatched] = useState(false);
   const [bandCVol, setBandCVol] = useState<number>(1);
   const abcx = useAbcxController();
   const [blindTestMode, setBlindTestMode] = useState<BlindTestMode | "off">("off");
@@ -302,16 +308,18 @@ function SonicSuiteApp() {
   const playbackSliderSelectionWidth = Math.max(1, playbackSliderEnd - playbackSliderStart);
   const hasIrB = Boolean(irBuffer);
   const hasIrC = Boolean(irCBuffer);
-  const canDeltaAB = hasIrB;
-  const canDeltaAC = hasIrC;
-  const canDeltaBC = hasIrB && hasIrC;
+  const canOrigMinusA = hasIrB;
+  const canOrigMinusB = hasIrC;
+  const canAMinusB = hasIrB && hasIrC;
   const availableDifferencePaths = useMemo(() => {
-    const paths: DifferencePath[] = [];
-    if (canDeltaAB) paths.push("DeltaAB");
-    if (canDeltaAC) paths.push("DeltaAC");
-    if (canDeltaBC) paths.push("DeltaBC");
+    const paths: DifferenceMode[] = [];
+    if (canOrigMinusA) paths.push("origMinusA");
+    if (canOrigMinusB) paths.push("origMinusB");
+    if (canAMinusB) paths.push("aMinusB");
     return paths;
-  }, [canDeltaAB, canDeltaAC, canDeltaBC]);
+  }, [canOrigMinusA, canOrigMinusB, canAMinusB]);
+  const isRmsMatched =
+    (hasIrB ? isConvolvedGainMatched : true) && (hasIrC ? isConvolvedBGainMatched : true);
 
   useEffect(() => {
     if (availableDifferencePaths.length === 0) return;
@@ -324,15 +332,15 @@ function SonicSuiteApp() {
 
   const differenceOptions = useMemo(
     () => [
-      { value: "DeltaAB" as DifferencePath, label: "B - A", shortcut: "5", disabled: !canDeltaAB },
-      { value: "DeltaAC" as DifferencePath, label: "C - A", shortcut: "6", disabled: !canDeltaAC },
-      { value: "DeltaBC" as DifferencePath, label: "B - C", shortcut: "7", disabled: !canDeltaBC },
+      { value: "origMinusA" as DifferenceMode, label: "Original − A", shortcut: "5", disabled: !canOrigMinusA },
+      { value: "origMinusB" as DifferenceMode, label: "Original − B", shortcut: "6", disabled: !canOrigMinusB },
+      { value: "aMinusB" as DifferenceMode, label: "A − B", shortcut: "7", disabled: !canAMinusB },
     ],
-    [canDeltaAB, canDeltaAC, canDeltaBC],
+    [canOrigMinusA, canOrigMinusB, canAMinusB],
   );
 
   const handleDifferencePathChange = useCallback(
-    (next: DifferencePath) => {
+    (next: DifferenceMode) => {
       if (isDifferenceFrozen) return;
       if (!availableDifferencePaths.includes(next)) return;
       if (differencePath === next) return;
@@ -351,6 +359,24 @@ function SonicSuiteApp() {
     }),
     [hasIrB, hasIrC],
   );
+
+  const modeDisableMap = useMemo<Partial<Record<Mode, boolean>>>(() => {
+    const base: Partial<Record<Mode, boolean>> = {};
+    if (!hasIrB) base.convolvedA = true;
+    if (!hasIrC) base.convolvedB = true;
+    if (availableDifferencePaths.length === 0) base.difference = true;
+    return base;
+  }, [availableDifferencePaths.length, hasIrB, hasIrC]);
+
+  const modeTooltips = useMemo<Partial<Record<Mode, string>>>(() => {
+    const tips: Partial<Record<Mode, string>> = {};
+    if (!hasIrB) tips.convolvedA = "Load IR A to audition the convolved signal.";
+    if (!hasIrC) tips.convolvedB = "Load IR B to audition the second convolved signal.";
+    if (availableDifferencePaths.length === 0) {
+      tips.difference = "Load at least one IR to explore difference playback.";
+    }
+    return tips;
+  }, [availableDifferencePaths.length, hasIrB, hasIrC]);
 
   const blindLastEntry = blindTrials.length > 0 ? blindTrials[blindTrials.length - 1] : null;
   const blindCurrentIndex = blindCurrent ? blindCurrent.index : null;
@@ -465,7 +491,7 @@ function SonicSuiteApp() {
         setName: setIrCName,
         matchGainRef: matchGainCRef,
         setMatchGain: setConvolvedCMatchGain,
-        setGainMatched: setConvolvedCGainMatched,
+        setGainMatched: setConvolvedBGainMatched,
         convolverLatency: convolverLatencyCRef,
       },
     } as const;
@@ -489,9 +515,12 @@ function SonicSuiteApp() {
       if (slot === "B") {
         residualBasisRef.current = null;
         residualBufRef.current = null;
-        if (mode === "convolved" && gainRef.current) {
+        if (mode === "convolvedA" && gainRef.current) {
           gainRef.current.gain.value = convolvedVol;
         }
+        setRmsOffsetsDb((prev) => ({ ...prev, convolvedA: 0, original: 0 }));
+      } else if (slot === "C") {
+        setRmsOffsetsDb((prev) => ({ ...prev, convolvedB: 0, original: 0 }));
       }
 
       const contextRate = audioCtxRef.current?.sampleRate ?? buf.sampleRate;
@@ -515,6 +544,9 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
       if (slot === "B") {
         residualBasisRef.current = null;
         residualBufRef.current = null;
+        setRmsOffsetsDb((prev) => ({ ...prev, convolvedA: 0 }));
+      } else if (slot === "C") {
+        setRmsOffsetsDb((prev) => ({ ...prev, convolvedB: 0 }));
       }
       slotState.convolverLatency.current = 0;
       setStatus(`IR-${slot} load failed: ${(err as Error).message}`);
@@ -587,12 +619,12 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
             return hasIrB ? "B" : null;
           case "C":
             return hasIrC ? "C" : null;
-          case "DeltaAB":
-            return hasIrB ? "DeltaAB" : null;
-          case "DeltaAC":
-            return hasIrC ? "DeltaAC" : null;
-          case "DeltaBC":
-            return hasIrB && hasIrC ? "DeltaBC" : null;
+          case "origMinusA":
+            return hasIrB ? "origMinusA" : null;
+          case "origMinusB":
+            return hasIrC ? "origMinusB" : null;
+          case "aMinusB":
+            return hasIrB && hasIrC ? "aMinusB" : null;
           default:
             return null;
         }
@@ -682,7 +714,7 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
       const requestedPath = bandPathOverrideRef.current ?? resolveModePath(playbackMode);
       let resolvedPath = ensurePathAvailable(requestedPath);
       if (!resolvedPath && playbackMode === "difference") {
-        let fallbackDelta: DifferencePath | null = null;
+        let fallbackDelta: DifferenceMode | null = null;
         for (const candidate of DIFFERENCE_PRIORITY) {
           if (ensurePathAvailable(candidate)) {
             fallbackDelta = candidate;
@@ -751,7 +783,9 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
     auditionRouterRef.current = null;
 
     const isDifference = isDifferenceMode;
-    const isConvolved = playbackMode === "convolved";
+    const isConvolvedA = playbackMode === "convolvedA";
+    const isConvolvedB = playbackMode === "convolvedB";
+    const isConvolved = isConvolvedA || isConvolvedB;
 
     let buffer: AudioBuffer | null = null;
     if (isDifference) {
@@ -769,7 +803,13 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
     }
 
     const src = new AudioBufferSourceNode(ctx, { buffer });
-    const initialGain = isDifference ? differenceVol : isConvolved ? convolvedVol : originalVol;
+    const initialGain = isDifference
+      ? differenceVol
+      : isConvolvedA
+      ? convolvedVol
+      : isConvolvedB
+      ? bandCVol
+      : originalVol;
     const volume = new GainNode(ctx, { gain: initialGain });
     srcRef.current = src;
     gainRef.current = volume;
@@ -784,20 +824,27 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
     matchGainCRef.current = null;
 
     if (isConvolved) {
-      const ir = irBufRef.current;
+      const irBufferRef = isConvolvedB ? irCBufRef : irBufRef;
+      const ir = irBufferRef.current;
       if (!ir) {
-        setStatus("No IR loaded.");
-        convolverLatencyRef.current = 0;
+        setStatus(isConvolvedB ? "IR B not loaded." : "IR A not loaded.");
+        (isConvolvedB ? convolverLatencyCRef : convolverLatencyRef).current = 0;
         return;
       }
       const latencySamplesValue = computeAnalysisOffset(ir, ir.length);
-      convolverLatencyRef.current = latencySamplesValue / ctx.sampleRate;
-      const conv = new ConvolverNode(ctx, { buffer: ir, disableNormalization: false });
-      const matchValue = Math.max(convolvedMatchGain, 1e-6);
-      const matchGain = new GainNode(ctx, { gain: matchValue });
-      convRef.current = conv;
-      matchGainRef.current = matchGain;
-      src.connect(conv).connect(matchGain).connect(volume).connect(ctx.destination);
+      const latencyRef = isConvolvedB ? convolverLatencyCRef : convolverLatencyRef;
+      latencyRef.current = latencySamplesValue / ctx.sampleRate;
+      const convNode = new ConvolverNode(ctx, { buffer: ir, disableNormalization: false });
+      const matchValue = Math.max(isConvolvedB ? convolvedCMatchGain : convolvedMatchGain, 1e-6);
+      const matchGainNode = new GainNode(ctx, { gain: matchValue });
+      if (isConvolvedB) {
+        convCRef.current = convNode;
+        matchGainCRef.current = matchGainNode;
+      } else {
+        convRef.current = convNode;
+        matchGainRef.current = matchGainNode;
+      }
+      src.connect(convNode).connect(matchGainNode).connect(volume).connect(ctx.destination);
     } else {
       const residualRate = buffer.sampleRate || sessionSampleRate;
       convolverLatencyRef.current =
@@ -814,8 +861,9 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
     };
 
     const startPlayback = () => {
+      const activeLatencyRef = isConvolvedB ? convolverLatencyCRef : convolverLatencyRef;
       const latency =
-        isConvolved || isDifference ? Math.max(0, convolverLatencyRef.current) : 0;
+        isConvolved || isDifference ? Math.max(0, activeLatencyRef.current) : 0;
       const startAt = Math.max(0, clampedStart - latency);
       try {
         src.start(0, startAt);
@@ -1531,8 +1579,8 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
   useEffect(() => {
     if (!bandScopeEngaged) return;
     const currentPath = bandPathRef.current;
-    const needsB = currentPath === "B" || currentPath === "DeltaAB" || currentPath === "DeltaBC";
-    const needsC = currentPath === "C" || currentPath === "DeltaAC" || currentPath === "DeltaBC";
+    const needsB = currentPath === "B" || currentPath === "origMinusA" || currentPath === "aMinusB";
+    const needsC = currentPath === "C" || currentPath === "origMinusB" || currentPath === "aMinusB";
     const hasCAssets = Boolean(irCBuffer && irCOriginal && irCName);
     if ((needsB && !hasIrB) || (needsC && !hasCAssets)) {
       bandPathRef.current = "A";
@@ -1571,16 +1619,16 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
           return;
         }
       }
-      let next: DifferencePath | null = null;
+      let next: DifferenceMode | null = null;
       switch (event.key) {
         case "5":
-          next = "DeltaAB";
+          next = "origMinusA";
           break;
         case "6":
-          next = "DeltaAC";
+          next = "origMinusB";
           break;
         case "7":
-          next = "DeltaBC";
+          next = "aMinusB";
           break;
         default:
           return;
@@ -1709,7 +1757,14 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
 
   function onChangeConvolvedVol(v: number) {
     setConvolvedVol(v);
-    if (gainRef.current && mode === "convolved") {
+    if (gainRef.current && mode === "convolvedA") {
+      gainRef.current.gain.value = v;
+    }
+  }
+
+  function onChangeConvolvedBVol(v: number) {
+    setBandCVol(v);
+    if (gainRef.current && mode === "convolvedB") {
       gainRef.current.gain.value = v;
     }
   }
@@ -1724,8 +1779,8 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
   function resetVolumes() {
     onChangeOriginalVol(1);
     onChangeConvolvedVol(1);
+    onChangeConvolvedBVol(1);
     onChangeDifferenceVol(1);
-    setBandCVol(1);
   }
 
   function handleIrManualTrim(startMs: number, endMs: number) {
@@ -1831,10 +1886,11 @@ IR-${slot} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(
     setIrBuffer(buffer);
     setConvolvedMatchGain(1);
     setConvolvedGainMatched(false);
+    setRmsOffsetsDb((prev) => ({ ...prev, convolvedA: 0 }));
     if (matchGainRef.current) {
       matchGainRef.current.gain.value = 1;
     }
-    if (mode === "convolved" && gainRef.current) {
+    if (mode === "convolvedA" && gainRef.current) {
       gainRef.current.gain.value = convolvedVol;
     }
     convolverLatencyRef.current = 0;
@@ -1904,11 +1960,12 @@ ${message}`);
 
     setMatchingRms(true);
     if (irB) setConvolvedGainMatched(false);
-    if (irC) setConvolvedCGainMatched(false);
+    if (irC) setConvolvedBGainMatched(false);
 
     const statusLines: string[] = [];
 
     try {
+      const offsetsUpdate: Partial<typeof rmsOffsetsDb> = {};
       if (irB) {
         const metrics = await analyseSlot(irB);
         setConvolvedMatchGain(metrics.matchGain);
@@ -1917,7 +1974,7 @@ ${message}`);
         if (matchGainRef.current) {
           matchGainRef.current.gain.value = metrics.matchGain;
         }
-        if (mode === "convolved" && gainRef.current) {
+        if (mode === "convolvedA" && gainRef.current) {
           gainRef.current.gain.value = convolvedVol;
         }
         if (mode === "original" && gainRef.current) {
@@ -1925,24 +1982,40 @@ ${message}`);
         }
         auditionRouterRef.current?.updateTrims({ B: metrics.matchGain });
         auditionRouterRef.current?.updateLatencies({ B: metrics.latencySeconds });
-        statusLines.push(`IR-B playback RMS gain set to ${metrics.matchGain.toFixed(2)}x.`);
+        const offsetDbRaw = 20 * Math.log10(metrics.matchGain);
+        const offsetDb = Number.isFinite(offsetDbRaw) ? offsetDbRaw : 0;
+        offsetsUpdate.convolvedA = offsetDb;
+        statusLines.push(`Convolved A RMS gain set to ${metrics.matchGain.toFixed(2)}x (${offsetDb.toFixed(2)} dB).`);
       }
 
       if (irC) {
         const metrics = await analyseSlot(irC);
         setConvolvedCMatchGain(metrics.matchGain);
-        setConvolvedCGainMatched(true);
+        setConvolvedBGainMatched(true);
         convolverLatencyCRef.current = metrics.latencySeconds;
         if (matchGainCRef.current) {
           matchGainCRef.current.gain.value = metrics.matchGain;
         }
+        if (mode === "convolvedB" && gainRef.current) {
+          gainRef.current.gain.value = bandCVol;
+        }
         auditionRouterRef.current?.updateTrims({ C: metrics.matchGain });
         auditionRouterRef.current?.updateLatencies({ C: metrics.latencySeconds });
-        statusLines.push(`IR-C playback RMS gain set to ${metrics.matchGain.toFixed(2)}x.`);
+        const offsetDbRaw = 20 * Math.log10(metrics.matchGain);
+        const offsetDb = Number.isFinite(offsetDbRaw) ? offsetDbRaw : 0;
+        offsetsUpdate.convolvedB = offsetDb;
+        statusLines.push(`Convolved B RMS gain set to ${metrics.matchGain.toFixed(2)}x (${offsetDb.toFixed(2)} dB).`);
       }
 
       if (statusLines.length > 0) {
         setStatus((s) => s + `\n${statusLines.join("\n")}`);
+      }
+      if (Object.keys(offsetsUpdate).length > 0) {
+        setRmsOffsetsDb((prev) => ({
+          ...prev,
+          ...offsetsUpdate,
+          original: 0,
+        }));
       }
     } catch (err) {
       setStatus(`RMS match failed: ${(err as Error).message}`);
@@ -2057,7 +2130,7 @@ ${message}`);
     }
   }
 
-  const canMatchRms = Boolean(musicBufRef.current && irBuffer);
+  const canMatchRms = Boolean(musicBufRef.current && (irBuffer || irCBuffer));
   const irBStatus = pathMetrics.B
     ? {
         latencyMs: pathMetrics.B.latencySeconds * 1000,
@@ -2287,7 +2360,12 @@ ${message}`);
                   </label>
                 </div>
               </div>
-              <ModeBar mode={mode} onChangeMode={onChangeMode} />
+              <ModeBar
+                mode={mode}
+                onChangeMode={onChangeMode}
+                disabledModes={modeDisableMap}
+                tooltips={modeTooltips}
+              />
               {mode === "difference" ? (
                 <div className={`difference-selector${isDifferenceFrozen ? " difference-selector--frozen" : ""}`}>
                   <div className="difference-selector__header">
@@ -2298,6 +2376,19 @@ ${message}`);
                     {differenceOptions.map((option) => {
                       const isActive = differencePath === option.value;
                       const isDisabled = option.disabled || isDifferenceFrozen;
+                      const reason =
+                        option.value === "aMinusB"
+                          ? "Load IR A and IR B to compare them."
+                          : option.value === "origMinusB"
+                          ? "Load IR B to compare against the original."
+                          : "Load IR A to compare against the original.";
+                      const tooltipSegments: string[] = [];
+                      if (option.disabled) tooltipSegments.push(reason);
+                      if (isDifferenceFrozen) tooltipSegments.push("Frozen during blind test.");
+                      if (!option.disabled && !isDifferenceFrozen) {
+                        tooltipSegments.push(`Keyboard ${option.shortcut}`);
+                      }
+                      const tooltip = tooltipSegments.join(" ");
                       return (
                         <button
                           key={option.value}
@@ -2306,7 +2397,7 @@ ${message}`);
                           onClick={() => handleDifferencePathChange(option.value)}
                           aria-pressed={isActive}
                           disabled={isDisabled}
-                          title={`Keyboard ${option.shortcut}`}
+                          title={tooltip || undefined}
                         >
                           {option.label}
                         </button>
@@ -2318,12 +2409,12 @@ ${message}`);
               <div className="rms-match">
                 <button
                   type="button"
-                  className={`control-button button-ghost rms-match__button${isConvolvedGainMatched ? " is-matched" : ""}`}
+                  className={`control-button button-ghost rms-match__button${isRmsMatched ? " is-matched" : ""}`}
                   onClick={matchConvolvedRMS}
                   disabled={isMatchingRms || !canMatchRms}
-                  aria-pressed={isConvolvedGainMatched}
+                  aria-pressed={isRmsMatched}
                 >
-                  {isMatchingRms ? "Matching..." : isConvolvedGainMatched ? "RMS Matched" : "Match RMS (Convolved)"}
+                  {isMatchingRms ? "Matching..." : isRmsMatched ? "RMS Matched" : "Match RMS"}
                 </button>
               </div>
               <Transport
@@ -2334,11 +2425,15 @@ ${message}`);
                 onChangeOriginalVol={onChangeOriginalVol}
                 convolvedVol={convolvedVol}
                 onChangeConvolvedVol={onChangeConvolvedVol}
+                convolvedDisabled={!hasIrB}
+                convolvedTooltip={modeTooltips.convolvedA}
+                convolvedBVol={bandCVol}
+                onChangeConvolvedBVol={setBandCVol}
+                convolvedBDisabled={!hasIrC}
+                convolvedBTooltip={modeTooltips.convolvedB}
                 differenceVol={differenceVol}
                 onChangeDifferenceVol={onChangeDifferenceVol}
-                isBandAudition={bandScopeEngaged}
-                bandCVol={hasIrC ? bandCVol : undefined}
-                onChangeBandCVol={hasIrC ? setBandCVol : undefined}
+                rmsOffsetsDb={rmsOffsetsDb}
                 onResetVolumes={resetVolumes}
                 duration={transportDuration}
                 position={clampedPlaybackPosition}
@@ -2455,7 +2550,7 @@ ${message}`);
                 <p className="panel-desc">Overlay the spectrum of the original track and its convolved version.</p>
               </div>
             </div>
-            <FRPlayback musicBuffer={musicBufRef.current} irBuffer={irBuffer} sampleRate={sessionSampleRate} />
+            <FRPlayback musicBuffer={musicBufRef.current} irBuffer={irBuffer} irBufferB={irCBuffer} sampleRate={sessionSampleRate} />
           </section>
         ) : view === "frdiff" ? (
           <section className="panel frpink-panel">

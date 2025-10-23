@@ -2,7 +2,7 @@ import { createBandpassChain, type BandSettings, type BandpassChain } from "./ba
 import { LatencyCompensator, type PathKey as BasePathKey, type LatencySecondsMap } from "./LatencyCompensator";
 
 export type BasePath = BasePathKey;
-export type DeltaPath = "DeltaAB" | "DeltaAC" | "DeltaBC";
+export type DeltaPath = "origMinusA" | "origMinusB" | "aMinusB";
 export type AuditionPath = BasePath | DeltaPath;
 
 type OutputGainMap = Record<AuditionPath, GainNode>;
@@ -20,7 +20,7 @@ type DeltaNodes = {
 };
 
 const BASE_PATHS: BasePath[] = ["A", "B", "C"];
-const DELTA_PATHS: DeltaPath[] = ["DeltaAB", "DeltaAC", "DeltaBC"];
+const DELTA_PATHS: DeltaPath[] = ["origMinusA", "origMinusB", "aMinusB"];
 
 const DEFAULT_CROSSFADE_MS = 8;
 
@@ -84,9 +84,9 @@ export class BandAuditionRouter {
       A: new GainNode(this.ctx, { gain: 0 }),
       B: new GainNode(this.ctx, { gain: 0 }),
       C: new GainNode(this.ctx, { gain: 0 }),
-      DeltaAB: new GainNode(this.ctx, { gain: 0 }),
-      DeltaAC: new GainNode(this.ctx, { gain: 0 }),
-      DeltaBC: new GainNode(this.ctx, { gain: 0 }),
+      origMinusA: new GainNode(this.ctx, { gain: 0 }),
+      origMinusB: new GainNode(this.ctx, { gain: 0 }),
+      aMinusB: new GainNode(this.ctx, { gain: 0 }),
     };
   }
 
@@ -101,9 +101,9 @@ export class BandAuditionRouter {
     };
 
     return {
-      DeltaAB: create(),
-      DeltaAC: create(),
-      DeltaBC: create(),
+      origMinusA: create(),
+      origMinusB: create(),
+      aMinusB: create(),
     };
   }
 
@@ -118,20 +118,19 @@ export class BandAuditionRouter {
       nodes.trim.connect(output);
     });
 
-    this.deltaNodes.DeltaAB.mix.connect(this.outputGains.DeltaAB);
-    this.deltaNodes.DeltaAC.mix.connect(this.outputGains.DeltaAC);
-    this.deltaNodes.DeltaBC.mix.connect(this.outputGains.DeltaBC);
+    this.deltaNodes.origMinusA.mix.connect(this.outputGains.origMinusA);
+    this.deltaNodes.origMinusB.mix.connect(this.outputGains.origMinusB);
+    this.deltaNodes.aMinusB.mix.connect(this.outputGains.aMinusB);
   }
 
   private connectDeltaRouting() {
-    this.baseNodes.A.trim.connect(this.deltaNodes.DeltaAB.negative);
-    this.baseNodes.B.trim.connect(this.deltaNodes.DeltaAB.positive);
-
-    this.baseNodes.A.trim.connect(this.deltaNodes.DeltaAC.negative);
-    this.baseNodes.C.trim.connect(this.deltaNodes.DeltaAC.positive);
-
-    this.baseNodes.B.trim.connect(this.deltaNodes.DeltaBC.negative);
-    this.baseNodes.C.trim.connect(this.deltaNodes.DeltaBC.positive);
+    const route = (path: DeltaPath, positive: BasePath, negative: BasePath) => {
+      this.baseNodes[positive].trim.connect(this.deltaNodes[path].positive);
+      this.baseNodes[negative].trim.connect(this.deltaNodes[path].negative);
+    };
+    route("origMinusA", "A", "B");
+    route("origMinusB", "A", "C");
+    route("aMinusB", "B", "C");
   }
 
   connectBase(path: BasePath, node: AudioNode) {

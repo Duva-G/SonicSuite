@@ -1,24 +1,40 @@
-﻿export type Mode = "original" | "convolved" | "difference";
+export type Mode = "original" | "convolvedA" | "convolvedB" | "difference";
 
 type Props = {
   mode: Mode;
   onChangeMode: (m: Mode) => void;
+  disabledModes?: Partial<Record<Mode, boolean>>;
+  tooltips?: Partial<Record<Mode, string>>;
 };
 
-export default function ModeBar({ mode, onChangeMode }: Props) {
-  const cls = (m: Mode) => `segmented-control__segment${mode === m ? " is-active" : ""}`;
+const LABELS: Record<Mode, string> = {
+  original: "Original",
+  convolvedA: "Convolved A",
+  convolvedB: "Convolved B",
+  difference: "Difference",
+};
 
+export default function ModeBar({ mode, onChangeMode, disabledModes, tooltips }: Props) {
   return (
     <div className="segmented-control" role="group" aria-label="Playback mode selector">
-      <button type="button" className={cls("original")} onClick={() => onChangeMode("original")}>
-        Original
-      </button>
-      <button type="button" className={cls("convolved")} onClick={() => onChangeMode("convolved")}>
-        Convolved
-      </button>
-      <button type="button" className={cls("difference")} onClick={() => onChangeMode("difference")}>
-        Difference
-      </button>
+      {(Object.keys(LABELS) as Mode[]).map((key) => {
+        const isActive = mode === key;
+        const isDisabled = Boolean(disabledModes?.[key]);
+        const className = `segmented-control__segment${isActive ? " is-active" : ""}`;
+        return (
+          <button
+            key={key}
+            type="button"
+            className={className}
+            onClick={() => onChangeMode(key)}
+            aria-pressed={isActive}
+            disabled={isDisabled}
+            title={tooltips?.[key]}
+          >
+            {LABELS[key]}
+          </button>
+        );
+      })}
     </div>
   );
 }

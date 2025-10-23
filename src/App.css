@@ -1511,6 +1511,13 @@
   font-weight: 500;
   color: rgba(235, 235, 245, 0.82);
 }
+.volume-label__meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: rgba(235, 235, 245, 0.55);
+}
 .volume-slider {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

@@ -31,6 +31,7 @@ type WorkerMessage = WorkerResultMessage | WorkerErrorMessage;
 type Props = {
   musicBuffer: AudioBuffer | null;
   irBuffer: AudioBuffer | null;
+  irBufferB?: AudioBuffer | null;
   sampleRate: number;
 };
 
@@ -40,6 +41,12 @@ type PlotDataArray = NonNullable<PlotComponentProps["data"]>;
 type PlotDatum = PlotDataArray[number];
 type PlotLayout = NonNullable<PlotComponentProps["layout"]>;
 type PlotConfig = NonNullable<PlotComponentProps["config"]>;
+type RequestKind = "dry" | "wetA" | "wetB";
+type PlaybackSpectraSet = {
+  dry: WorkerResultPayload | null;
+  convolvedA: WorkerResultPayload | null;
+  convolvedB: WorkerResultPayload | null;
+};
 
 const MIN_FREQ = 20;
 const MAX_FREQ = 20000;
@@ -55,18 +62,30 @@ const smoothingOptions: Array<{ value: SmoothingMode; label: string }> = [
 ];
 
 const MAX_PLAYBACK_ANALYSIS_SECONDS = 30;
+const PLAYBACK_COLORS = {
+  original: "#0a84ff",
+  convolvedA: "#30d158",
+  convolvedB: "#ff9f0a",
+} as const;
 
-export default function FRPlayback({ musicBuffer, irBuffer, sampleRate }: Props) {
+export default function FRPlayback({ musicBuffer, irBuffer: irBufferA, irBufferB = null, sampleRate }: Props) {
   const [smoothing, setSmoothing] = useState<SmoothingMode>("1/6");
-  const [spectra, setSpectra] = useState<WorkerResultPayload | null>(null);
+  const [spectraSet, setSpectraSet] = useState<PlaybackSpectraSet>(() => ({
+    dry: null,
+    convolvedA: null,
+    convolvedB: null,
+  }));
   const [isLoading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [workerReady, setWorkerReady] = useState(false);
 
   const workerRef = useRef<Worker | null>(null);
   const requestIdRef = useRef(0);
-  const activeRequestRef = useRef(0);
+  const generationRef = useRef(0);
   const pendingRenderRef = useRef(false);
+  const requestKindMapRef = useRef(new Map<number, { kind: RequestKind; generation: number }>());
+  const expectedKindsRef = useRef<Set<RequestKind>>(new Set());
+  const responsesRef = useRef<PlaybackSpectraSet>({ dry: null, convolvedA: null, convolvedB: null });
 
   const createBaseLayout = useCallback(
     () =>
@@ -140,17 +159,57 @@ export default function FRPlayback({ musicBuffer, irBuffer, sampleRate }: Props)
     const handleMessage = (event: MessageEvent<WorkerMessage>) => {
       const data = event.data;
       if (!data) return;
+      if (data.type !== "playback-fr-result" && data.type !== "playback-fr-error") {
+        return;
+      }
+
+      const meta = requestKindMapRef.current.get(data.requestId);
+      if (!meta) {
+        return;
+      }
+
+      requestKindMapRef.current.delete(data.requestId);
+      if (meta.generation !== generationRef.current) {
+        return;
+      }
+
+      const { kind } = meta;
+
       if (data.type === "playback-fr-result") {
-        if (data.requestId !== activeRequestRef.current) return;
-        pendingRenderRef.current = true;
-        setSpectra(data.payload);
+        if (kind === "dry") {
+          responsesRef.current.dry = data.payload;
+        } else if (kind === "wetA") {
+          responsesRef.current.convolvedA = data.payload;
+        } else if (kind === "wetB") {
+          responsesRef.current.convolvedB = data.payload;
+        }
+        setSpectraSet({
+          dry: responsesRef.current.dry,
+          convolvedA: responsesRef.current.convolvedA,
+          convolvedB: responsesRef.current.convolvedB,
+        });
         setError(null);
-      } else if (data.type === "playback-fr-error") {
-        if (data.requestId !== activeRequestRef.current) return;
-        pendingRenderRef.current = false;
-        setSpectra(null);
-        setLoading(false);
+      } else {
+        if (kind === "dry") {
+          responsesRef.current.dry = null;
+        } else if (kind === "wetA") {
+          responsesRef.current.convolvedA = null;
+        } else if (kind === "wetB") {
+          responsesRef.current.convolvedB = null;
+        }
+        setSpectraSet({
+          dry: responsesRef.current.dry,
+          convolvedA: responsesRef.current.convolvedA,
+          convolvedB: responsesRef.current.convolvedB,
+        });
         setError(data.error);
+      }
+
+      expectedKindsRef.current.delete(kind);
+      const stillPending = expectedKindsRef.current.size > 0;
+      setLoading(stillPending);
+      if (!stillPending) {
+        pendingRenderRef.current = true;
       }
     };
 
@@ -165,96 +224,127 @@ export default function FRPlayback({ musicBuffer, irBuffer, sampleRate }: Props)
 
   useEffect(() => {
     if (!workerReady) return;
-    if (!musicBuffer) {
-      setSpectra(null);
-      pendingRenderRef.current = false;
-      setLoading(false);
-      setError("Load a music track to inspect its response.");
-      return;
-    }
     const worker = workerRef.current;
     if (!worker) return;
 
-    const requestId = ++requestIdRef.current;
-    activeRequestRef.current = requestId;
+    if (!musicBuffer) {
+      requestKindMapRef.current.clear();
+      expectedKindsRef.current.clear();
+      responsesRef.current = { dry: null, convolvedA: null, convolvedB: null };
+      setSpectraSet({ dry: null, convolvedA: null, convolvedB: null });
+      pendingRenderRef.current = false;
+      setLoading(false);
+      setError("Load a music track to compare its convolved response.");
+      return;
+    }
+
+    generationRef.current += 1;
+    const currentGeneration = generationRef.current;
+    requestKindMapRef.current.clear();
+    responsesRef.current = { dry: null, convolvedA: null, convolvedB: null };
+    setSpectraSet({ dry: null, convolvedA: null, convolvedB: null });
     pendingRenderRef.current = false;
-    setLoading(true);
     setError(null);
 
-    const musicPayload = serializeBuffer(musicBuffer, "music", MAX_PLAYBACK_ANALYSIS_SECONDS);
-    const irPayload = irBuffer ? serializeBuffer(irBuffer, "ir") : null;
-    const transferables: Transferable[] = [musicPayload.data.buffer];
-    if (irPayload) transferables.push(irPayload.data.buffer);
+    const pendingKinds: RequestKind[] = ["dry"];
+    if (irBufferA) pendingKinds.push("wetA");
+    if (irBufferB) pendingKinds.push("wetB");
 
-    worker.postMessage(
-      {
-        type: "compute-playback-fr",
-        requestId,
-        payload: {
-          sampleRate,
-          smoothing,
-          music: {
-            data: musicPayload.data,
-            sampleRate: musicPayload.sampleRate,
-            label: "Music",
+    if (pendingKinds.length === 0) {
+      setLoading(false);
+      return;
+    }
+
+    expectedKindsRef.current = new Set(pendingKinds);
+    setLoading(true);
+
+    const makePayload = (buffer: AudioBuffer, label: string) =>
+      serializeBuffer(buffer, label, MAX_PLAYBACK_ANALYSIS_SECONDS);
+
+    for (const kind of pendingKinds) {
+      const requestId = ++requestIdRef.current;
+      requestKindMapRef.current.set(requestId, { kind, generation: currentGeneration });
+
+      const musicPayload = makePayload(musicBuffer, "music");
+      const irSource = kind === "wetA" ? irBufferA : kind === "wetB" ? irBufferB : null;
+      const irPayload = irSource ? makePayload(irSource, kind === "wetB" ? "ir-b" : "ir") : null;
+
+      const transferables: Transferable[] = [musicPayload.data.buffer];
+      if (irPayload) transferables.push(irPayload.data.buffer);
+
+      worker.postMessage(
+        {
+          type: "compute-playback-fr",
+          requestId,
+          payload: {
+            sampleRate,
+            smoothing,
+            music: {
+              data: musicPayload.data,
+              sampleRate: musicPayload.sampleRate,
+              label: "Music",
+            },
+            ir: irPayload
+              ? {
+                  data: irPayload.data,
+                  sampleRate: irPayload.sampleRate,
+                  label: kind === "wetB" ? "IR B" : "IR",
+                }
+              : null,
           },
-          ir: irPayload
-            ? {
-                data: irPayload.data,
-                sampleRate: irPayload.sampleRate,
-                label: "IR",
-              }
-            : null,
         },
-      },
-      transferables
-    );
-  }, [workerReady, musicBuffer, irBuffer, sampleRate, smoothing]);
+        transferables
+      );
+    }
+  }, [workerReady, musicBuffer, irBufferA, irBufferB, sampleRate, smoothing]);
 
   const traces = useMemo<PlotDataArray>(() => {
-    if (!spectra) return [] as PlotDataArray;
-    const baseHover = "<b>%{x:.0f} Hz</b><br>%{y:.2f} dB<extra></extra>";
-    const freqs = Array.from(spectra.freqs);
-    const sanitizedFreqs = freqs.map((hz) => (hz > 0 ? hz : MIN_FREQ));
-    const series: number[][] = [Array.from(spectra.dryDb)];
+    const dry = spectraSet.dry;
+    if (!dry) return [] as PlotDataArray;
 
-    if (spectra.hasIR && spectra.wetDb) {
-      series.push(Array.from(spectra.wetDb));
+    const freqs = Array.from(dry.freqs);
+    const sanitizedFreqs = freqs.map((hz) => (hz > 0 ? hz : MIN_FREQ));
+    const baseHover = "<b>%{customdata}</b><br><b>%{x:.0f} Hz</b><br>%{y:.2f} dB<extra></extra>";
+
+    const series: number[][] = [];
+    const meta: Array<{ key: "original" | "convolvedA" | "convolvedB"; name: string }> = [];
+
+    series.push(Array.from(dry.dryDb));
+    meta.push({ key: "original", name: "Original" });
+
+    if (spectraSet.convolvedA?.wetDb) {
+      series.push(Array.from(spectraSet.convolvedA.wetDb));
+      meta.push({ key: "convolvedA", name: "Convolved A" });
+    }
+
+    if (spectraSet.convolvedB?.wetDb) {
+      series.push(Array.from(spectraSet.convolvedB.wetDb));
+      meta.push({ key: "convolvedB", name: "Convolved B" });
     }
 
     const { arrays } = normalizePlaybackSeries(series);
-    const dryNormalized = arrays[0] ?? [];
-    const result: PlotDatum[] = [
-      {
-        type: "scatter",
-        mode: "lines",
-        name: "Original (music)",
-        hovertemplate: baseHover,
-        x: sanitizedFreqs,
-        y: dryNormalized,
-        line: { color: "#5ac8fa", width: 2 },
-      } as PlotDatum,
-    ];
 
-    if (spectra.hasIR && arrays[1]) {
-      result.push({
+    const result: PlotDatum[] = meta.map((entry, idx) => {
+      const yValues = arrays[idx] ?? [];
+      return {
         type: "scatter",
         mode: "lines",
-        name: "Convolved",
+        name: entry.name,
         hovertemplate: baseHover,
+        customdata: new Array(yValues.length).fill(entry.name),
         x: sanitizedFreqs,
-        y: arrays[1],
-        line: { color: "#ff9f0a", width: 2 },
-      } as PlotDatum);
-    }
+        y: yValues,
+        line: { color: PLAYBACK_COLORS[entry.key], width: 2 },
+      } as PlotDatum;
+    });
 
     return result as PlotDataArray;
-  }, [spectra]);
+  }, [spectraSet]);
 
   useEffect(() => {
-    if (!spectra) return;
+    if (!spectraSet.dry) return;
     resetAxes();
-  }, [spectra, resetAxes]);
+  }, [spectraSet.dry, resetAxes]);
 
 
   const handleRelayout = (eventData: Partial<Record<string, unknown>>) => {
@@ -298,6 +388,13 @@ export default function FRPlayback({ musicBuffer, irBuffer, sampleRate }: Props)
     []
   );
 
+  const hasDry = Boolean(spectraSet.dry);
+  const hasWetA = Boolean(spectraSet.convolvedA?.wetDb);
+  const hasWetB = Boolean(spectraSet.convolvedB?.wetDb);
+  const showNoIrMessage = !isLoading && hasDry && !irBufferA && !irBufferB;
+  const showWetAPending = !isLoading && Boolean(irBufferA) && !hasWetA;
+  const showWetBPending = !isLoading && Boolean(irBufferB) && !hasWetB;
+
   return (
     <div className="frpink frplayback">
       <div className="frpink-controls">
@@ -324,11 +421,14 @@ export default function FRPlayback({ musicBuffer, irBuffer, sampleRate }: Props)
       </div>
 
       {error && <div className="frpink-message frpink-message--error">{error}</div>}
-      {!isLoading && spectra && !irBuffer && (
-        <div className="frpink-message">Load an impulse response to overlay the convolved response.</div>
+      {showNoIrMessage && (
+        <div className="frpink-message">Load an impulse response to overlay the convolved responses.</div>
       )}
-      {!isLoading && spectra && irBuffer && !spectra.hasIR && (
-        <div className="frpink-message">Overlay pending—try matching RMS before reanalysing.</div>
+      {showWetAPending && (
+        <div className="frpink-message">Convolved A overlay pending - try matching RMS before reanalysing.</div>
+      )}
+      {showWetBPending && (
+        <div className="frpink-message">Convolved B overlay pending - try matching RMS before reanalysing.</div>
       )}
 
       <div className="frpink-plot">
@@ -340,7 +440,7 @@ export default function FRPlayback({ musicBuffer, irBuffer, sampleRate }: Props)
             <span className="frplot-progress__label">Preparing spectrum</span>
           </div>
         )}
-        {spectra && (
+        {hasDry && (
           <Plot
             data={traces}
             layout={layout}
