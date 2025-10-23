@@ -805,6 +805,16 @@
   outline-offset: 2px;
 }
 
+.segmented-control__button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  color: rgba(235, 235, 245, 0.55);
+}
+
+.segmented-control__button:disabled:hover {
+  color: rgba(235, 235, 245, 0.55);
+}
+
 .segmented-control__button[aria-pressed="true"],
 .segmented-control__button--active {
   background: linear-gradient(160deg, rgba(10, 132, 255, 0.6), rgba(10, 132, 255, 0.4));

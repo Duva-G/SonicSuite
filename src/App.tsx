@@ -2476,6 +2476,7 @@ ${message}`);
                     compact
                     musicBuffer={musicBufRef.current}
                     irBuffer={irBuffer}
+                    irBufferB={irCBuffer}
                     sampleRate={sessionSampleRate}
                     absMode={differenceAbsMode}
                     onChangeAbsMode={setDifferenceAbsMode}
@@ -2563,6 +2564,7 @@ ${message}`);
             <FRDifference
               musicBuffer={musicBufRef.current}
               irBuffer={irBuffer}
+              irBufferB={irCBuffer}
               sampleRate={sessionSampleRate}
               absMode={differenceAbsMode}
               onChangeAbsMode={setDifferenceAbsMode}
