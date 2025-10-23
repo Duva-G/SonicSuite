@@ -41,6 +41,7 @@ type WorkerMessage = WorkerResultMessage | WorkerErrorMessage;
 type Props = {
   musicBuffer: AudioBuffer | null;
   irBuffer: AudioBuffer | null;
+  irBufferB?: AudioBuffer | null;
   sampleRate: number;
   compact?: boolean;
   // Controlled props (optional) so parent can sync threshold/abs across instances
@@ -61,8 +62,59 @@ const Plot = createPlotlyComponent(Plotly);
 type PlotProps = ComponentProps<typeof Plot>;
 type PlotLayout = NonNullable<PlotProps["layout"]>;
 type PlotConfig = NonNullable<PlotProps["config"]>;
+type PlotDataArray = NonNullable<PlotProps["data"]>;
+type PlotDatum = PlotDataArray[number];
 
-type DifferenceSpectra = WorkerResultPayload & { diffDb: Float32Array | null };
+type RequestKind = "dry" | "wetA" | "wetB";
+
+type DifferenceSpectraSet = {
+  dry: WorkerResultPayload | null;
+  convolvedA: WorkerResultPayload | null;
+  convolvedB: WorkerResultPayload | null;
+};
+
+type DifferenceCurveId = "origMinusA" | "origMinusB" | "aMinusB";
+
+type DifferenceCurveMeta = {
+  id: DifferenceCurveId;
+  label: string;
+  color: string;
+  dash: "dash";
+  disabledReason?: string;
+};
+
+type DifferenceCurveData = DifferenceCurveMeta & {
+  values: Float32Array | null;
+  available: boolean;
+  phase?: Float32Array | null;
+};
+
+const DIFFERENCE_CURVE_META: Record<DifferenceCurveId, DifferenceCurveMeta> = {
+  origMinusA: {
+    id: "origMinusA",
+    label: "Original − A",
+    color: "#6ea8ff",
+    dash: "dash",
+    disabledReason: "Requires IR A",
+  },
+  origMinusB: {
+    id: "origMinusB",
+    label: "Original − B",
+    color: "#6fd59a",
+    dash: "dash",
+    disabledReason: "Requires IR B",
+  },
+  aMinusB: {
+    id: "aMinusB",
+    label: "A − B",
+    color: "#f3a762",
+    dash: "dash",
+    disabledReason: "Requires IR B",
+  },
+};
+
+const FR_VISIBILITY_STORAGE_KEY = "frdifference.visibility";
+const DEFAULT_VISIBLE_CURVES: DifferenceCurveId[] = ["origMinusA", "origMinusB", "aMinusB"];
 
 const MIN_FREQ = 20;
 const MAX_FREQ = 20000;
@@ -206,6 +258,7 @@ function percentile(values: number[], fraction: number): number | null {
 export default function FRDifference({
   musicBuffer,
   irBuffer,
+  irBufferB = null,
   sampleRate,
   compact = false,
   thresholdDb: thresholdDbProp,
@@ -221,7 +274,11 @@ export default function FRDifference({
   onChangeBandMatchRmsEnabled,
 }: Props) {
   const [smoothing, setSmoothing] = useState<SmoothingMode>("1/6");
-  const [spectra, setSpectra] = useState<DifferenceSpectra | null>(null);
+  const [spectraSet, setSpectraSet] = useState<DifferenceSpectraSet>(() => ({
+    dry: null,
+    convolvedA: null,
+    convolvedB: null,
+  }));
   const [isLoading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [workerReady, setWorkerReady] = useState(false);
@@ -305,6 +362,7 @@ export default function FRDifference({
   const thresholdLabelId = useId();
   const smoothingLabelId = useId();
   const displayLabelId = useId();
+  const curvesLabelId = useId();
   const soloLabelId = useId();
   const matchRmsLabelId = useId();
   const thresholdHelperId = useId();
@@ -322,6 +380,38 @@ export default function FRDifference({
     }
     setBandPresetState(derivedPreset);
   }, [derivedPreset]);
+
+  const [visibleCurves, setVisibleCurves] = useState<DifferenceCurveId[]>(() => {
+    const fallback = [...DEFAULT_VISIBLE_CURVES];
+    if (typeof window === "undefined") {
+      return fallback;
+    }
+    try {
+      const stored = window.localStorage.getItem(FR_VISIBILITY_STORAGE_KEY);
+      if (!stored) {
+        return fallback;
+      }
+      const parsed = JSON.parse(stored);
+      if (!Array.isArray(parsed)) {
+        return fallback;
+      }
+      const sanitized = parsed.filter((value): value is DifferenceCurveId =>
+        typeof value === "string" && (value === "origMinusA" || value === "origMinusB" || value === "aMinusB"),
+      );
+      return sanitized.length > 0 ? Array.from(new Set(sanitized)) : fallback;
+    } catch {
+      return fallback;
+    }
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(FR_VISIBILITY_STORAGE_KEY, JSON.stringify(visibleCurves));
+    } catch {
+      // ignore storage issues
+    }
+  }, [visibleCurves]);
 
   const handleBandMinChange = (event: ChangeEvent<HTMLInputElement>) => {
     const sliderValue = Number(event.currentTarget.value);
@@ -341,10 +431,122 @@ export default function FRDifference({
     setBandRange(bandMinHz, nextMax);
   };
 
+  const differenceData = useMemo(() => {
+    const baseDryPayload =
+      spectraSet.dry ??
+      (spectraSet.convolvedA?.dryDb ? spectraSet.convolvedA : null) ??
+      (spectraSet.convolvedB?.dryDb ? spectraSet.convolvedB : null) ??
+      null;
+    const dryDb = baseDryPayload?.dryDb ?? null;
+    const baseFreqs =
+      spectraSet.dry?.freqs ??
+      spectraSet.convolvedA?.freqs ??
+      spectraSet.convolvedB?.freqs ??
+      null;
+
+    const wetA = spectraSet.convolvedA?.wetDb ?? null;
+    const wetB = spectraSet.convolvedB?.wetDb ?? null;
+
+    const origMinusAValues = dryDb && wetA ? computeDbDelta(dryDb, wetA) : null;
+    const origMinusBValues = dryDb && wetB ? computeDbDelta(dryDb, wetB) : null;
+    const aMinusBValues = wetA && wetB ? computeDbDelta(wetA, wetB) : null;
+
+    const buildCurve = (
+      meta: DifferenceCurveMeta,
+      values: Float32Array | null,
+      available: boolean,
+      overrideDisabled?: string,
+    ): DifferenceCurveData => ({
+      ...meta,
+      values,
+      available,
+      disabledReason: overrideDisabled ?? meta.disabledReason,
+      phase: null,
+    });
+
+    const curves: Record<DifferenceCurveId, DifferenceCurveData> = {
+      origMinusA: buildCurve(
+        DIFFERENCE_CURVE_META.origMinusA,
+        origMinusAValues,
+        Boolean(origMinusAValues),
+        wetA ? undefined : "Requires IR A",
+      ),
+      origMinusB: buildCurve(
+        DIFFERENCE_CURVE_META.origMinusB,
+        origMinusBValues,
+        Boolean(origMinusBValues),
+        wetB ? undefined : "Requires IR B",
+      ),
+      aMinusB: buildCurve(
+        DIFFERENCE_CURVE_META.aMinusB,
+        aMinusBValues,
+        Boolean(aMinusBValues),
+        wetA && wetB ? undefined : "Requires IR B",
+      ),
+    };
+
+    return {
+      freqs: baseFreqs,
+      curves,
+    };
+  }, [spectraSet]);
+
+  const availableCurveIds = useMemo<DifferenceCurveId[]>(() => {
+    const ordered = DEFAULT_VISIBLE_CURVES.filter(
+      (id) => differenceData.curves[id].available,
+    ) as DifferenceCurveId[];
+    return ordered;
+  }, [differenceData.curves]);
+
+  const previousAvailableRef = useRef<DifferenceCurveId[]>(availableCurveIds);
+
+  useEffect(() => {
+    const previousAvailable = previousAvailableRef.current;
+    previousAvailableRef.current = availableCurveIds;
+    setVisibleCurves((prev) => {
+      const prevUnique = DEFAULT_VISIBLE_CURVES.filter((id) => prev.includes(id));
+      const sanitized = DEFAULT_VISIBLE_CURVES.filter(
+        (id) => prevUnique.includes(id) && availableCurveIds.includes(id),
+      ) as DifferenceCurveId[];
+      const newlyAvailable = availableCurveIds.filter((id) => !previousAvailable.includes(id));
+      let next: DifferenceCurveId[];
+      if (availableCurveIds.length === 0) {
+        next = [];
+      } else if (sanitized.length === 0) {
+        next = [...availableCurveIds];
+      } else if (newlyAvailable.length > 0) {
+        const mergedSet = new Set<DifferenceCurveId>([...sanitized, ...newlyAvailable]);
+        next = DEFAULT_VISIBLE_CURVES.filter((id) => mergedSet.has(id) && availableCurveIds.includes(id)) as DifferenceCurveId[];
+      } else {
+        next = sanitized;
+      }
+      if (next.length === prev.length && next.every((id, idx) => id === prev[idx])) {
+        return prev;
+      }
+      return next;
+    });
+  }, [availableCurveIds]);
+
+  const primaryCurveId = useMemo<DifferenceCurveId | null>(() => {
+    for (const id of DEFAULT_VISIBLE_CURVES) {
+      if (visibleCurves.includes(id) && differenceData.curves[id].available) {
+        return id;
+      }
+    }
+    for (const id of DEFAULT_VISIBLE_CURVES) {
+      if (differenceData.curves[id].available) {
+        return id;
+      }
+    }
+    return null;
+  }, [visibleCurves, differenceData.curves]);
+
+  const primaryCurve = primaryCurveId ? differenceData.curves[primaryCurveId] : null;
+
   const diffValues = useMemo(() => {
-    if (!spectra?.diffDb) return null;
-    return Array.from(spectra.diffDb);
-  }, [spectra]);
+    if (!primaryCurve?.values) return null;
+    return Array.from(primaryCurve.values);
+  }, [primaryCurve]);
 
   const absoluteDiffValues = useMemo(() => {
     if (!diffValues) return null;
@@ -362,8 +564,8 @@ export default function FRDifference({
     const rms =
       len === 0 ? 0 : Math.sqrt(displayedDiffValues.reduce((sum, value) => sum + value * value, 0) / len);
     const peak = displayedDiffValues.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
-    const threshold = Math.max(thresholdDb, 0);
-    const aboveCount = absoluteDiffValues.reduce(
+  const threshold = Math.max(thresholdDb, 0);
+  const aboveCount = absoluteDiffValues.reduce(
       (count, value) => count + (value >= threshold ? 1 : 0),
       0,
     );
@@ -373,12 +575,16 @@ export default function FRDifference({
 
   const metricsBadges = useMemo(() => {
     if (!metrics) return [];
-    return [
+    const items = [
       { label: "RMS", value: `${metrics.rms.toFixed(1)} dB` },
       { label: "Peak", value: `${metrics.peak.toFixed(1)} dB` },
       { label: "% > threshold", value: `${Math.round(metrics.percentAbove)}%` },
     ];
-  }, [metrics]);
+    if (primaryCurve) {
+      items.unshift({ label: "Curve", value: primaryCurve.label });
+    }
+    return items;
+  }, [metrics, primaryCurve]);
   const showMetrics = metricsBadges.length > 0;
 
   const handlePresetChange = (event: ChangeEvent<HTMLSelectElement>) => {
@@ -476,7 +682,14 @@ export default function FRDifference({
 
   const workerRef = useRef<Worker | null>(null);
   const requestIdRef = useRef(0);
-  const activeRequestRef = useRef(0);
+  const generationRef = useRef(0);
+  const requestKindMapRef = useRef(new Map<number, { kind: RequestKind; generation: number }>());
+  const expectedKindsRef = useRef<Set<RequestKind>>(new Set());
+  const responsesRef = useRef<DifferenceSpectraSet>({
+    dry: null,
+    convolvedA: null,
+    convolvedB: null,
+  });
   const pendingRenderRef = useRef(false);
 
   const createBaseLayout = useCallback(
@@ -561,23 +774,62 @@ export default function FRDifference({
 
     const handleMessage = (event: MessageEvent<WorkerMessage>) => {
       const data = event.data;
-      if (!data) return;
+      if (!data || (data.type !== "playback-fr-result" && data.type !== "playback-fr-error")) {
+        return;
+      }
+
+      const meta = requestKindMapRef.current.get(data.requestId);
+      if (!meta) {
+        return;
+      }
+      requestKindMapRef.current.delete(data.requestId);
+      if (meta.generation !== generationRef.current) {
+        return;
+      }
+
+      const { kind } = meta;
+
       if (data.type === "playback-fr-result") {
-        if (data.requestId !== activeRequestRef.current) return;
-        const payload = data.payload;
-        const diff = payload.wetDb ? computeDifference(payload.dryDb, payload.wetDb) : null;
-        pendingRenderRef.current = Boolean(diff);
-        setSpectra({ ...payload, diffDb: diff });
-        if (!diff) {
+        if (kind === "dry") {
+          responsesRef.current.dry = data.payload;
+        } else if (kind === "wetA") {
+          responsesRef.current.convolvedA = data.payload;
+        } else if (kind === "wetB") {
+          responsesRef.current.convolvedB = data.payload;
+        }
+        setSpectraSet({
+          dry: responsesRef.current.dry,
+          convolvedA: responsesRef.current.convolvedA,
+          convolvedB: responsesRef.current.convolvedB,
+        });
+        setError(null);
+      } else {
+        if (kind === "dry") {
+          responsesRef.current.dry = null;
+        } else if (kind === "wetA") {
+          responsesRef.current.convolvedA = null;
+        } else if (kind === "wetB") {
+          responsesRef.current.convolvedB = null;
+        }
+        setSpectraSet({
+          dry: responsesRef.current.dry,
+          convolvedA: responsesRef.current.convolvedA,
+          convolvedB: responsesRef.current.convolvedB,
+        });
+        setError(data.error);
+      }
+
+      expectedKindsRef.current.delete(kind);
+      const stillPending = expectedKindsRef.current.size > 0;
+      setLoading(stillPending);
+      if (!stillPending) {
+        const hasDiffPayload =
+          Boolean(responsesRef.current.convolvedA?.wetDb) ||
+          Boolean(responsesRef.current.convolvedB?.wetDb);
+        pendingRenderRef.current = hasDiffPayload;
+        if (!hasDiffPayload) {
           setLoading(false);
         }
-        setError(null);
-      } else if (data.type === "playback-fr-error") {
-        if (data.requestId !== activeRequestRef.current) return;
-        pendingRenderRef.current = false;
-        setSpectra(null);
-        setLoading(false);
-        setError(data.error);
       }
     };
 
@@ -592,72 +844,165 @@ export default function FRDifference({
 
   useEffect(() => {
     if (!workerReady) return;
+    const worker = workerRef.current;
+    if (!worker) return;
+
     if (!musicBuffer) {
-      setSpectra(null);
+      requestKindMapRef.current.clear();
+      expectedKindsRef.current.clear();
+      responsesRef.current = { dry: null, convolvedA: null, convolvedB: null };
+      setSpectraSet({ dry: null, convolvedA: null, convolvedB: null });
       pendingRenderRef.current = false;
       setLoading(false);
       setError("Load a music track to compare its convolved difference.");
       return;
     }
-    const worker = workerRef.current;
-    if (!worker) return;
 
-    const requestId = ++requestIdRef.current;
-    activeRequestRef.current = requestId;
+    generationRef.current += 1;
+    const currentGeneration = generationRef.current;
+    requestKindMapRef.current.clear();
+    expectedKindsRef.current.clear();
+    responsesRef.current = { dry: null, convolvedA: null, convolvedB: null };
+    setSpectraSet({ dry: null, convolvedA: null, convolvedB: null });
     pendingRenderRef.current = false;
-    setLoading(true);
+
+    const pendingKinds: RequestKind[] = ["dry"];
+    if (irBuffer) pendingKinds.push("wetA");
+    if (irBufferB) pendingKinds.push("wetB");
+
+    const expectDifferences = pendingKinds.includes("wetA") || pendingKinds.includes("wetB");
+    expectedKindsRef.current = new Set(pendingKinds);
+    setLoading(expectDifferences);
     setError(null);
+    pendingRenderRef.current = expectDifferences;
 
-    const musicPayload = serializeBuffer(musicBuffer, "music");
-    const irPayload = irBuffer ? serializeBuffer(irBuffer, "ir") : null;
-    const transferables: Transferable[] = [musicPayload.data.buffer];
-    if (irPayload) transferables.push(irPayload.data.buffer);
+    if (pendingKinds.length === 0) {
+      return;
+    }
 
-    worker.postMessage(
-      {
-        type: "compute-playback-fr",
-        requestId,
-        payload: {
-          sampleRate,
-          smoothing,
-          music: {
-            data: musicPayload.data,
-            sampleRate: musicPayload.sampleRate,
-            label: "Music",
+    for (const kind of pendingKinds) {
+      const requestId = ++requestIdRef.current;
+      requestKindMapRef.current.set(requestId, { kind, generation: currentGeneration });
+
+      const musicPayload = serializeBuffer(musicBuffer, "music");
+      const irSource = kind === "wetA" ? irBuffer : kind === "wetB" ? irBufferB : null;
+      const irPayload = irSource ? serializeBuffer(irSource, kind === "wetB" ? "ir-b" : "ir") : null;
+
+      const transferables: Transferable[] = [musicPayload.data.buffer];
+      if (irPayload) transferables.push(irPayload.data.buffer);
+
+      worker.postMessage(
+        {
+          type: "compute-playback-fr",
+          requestId,
+          payload: {
+            sampleRate,
+            smoothing,
+            music: {
+              data: musicPayload.data,
+              sampleRate: musicPayload.sampleRate,
+              label: "Music",
+            },
+            ir: irPayload
+              ? {
+                  data: irPayload.data,
+                  sampleRate: irPayload.sampleRate,
+                  label: kind === "wetB" ? "IR B" : "IR",
+                }
+              : null,
           },
-          ir: irPayload
-            ? {
-                data: irPayload.data,
-                sampleRate: irPayload.sampleRate,
-                label: "IR",
-              }
-            : null,
         },
-      },
-      transferables
-    );
-  }, [workerReady, musicBuffer, irBuffer, sampleRate, smoothing]);
+        transferables
+      );
+    }
+  }, [workerReady, musicBuffer, irBuffer, irBufferB, sampleRate, smoothing]);
 
-  const trace = useMemo(() => {
-    if (!spectra?.diffDb || !spectra.wetDb || !displayedDiffValues) return null;
-    const freqs = Array.from(spectra.freqs);
-    const sanitizedFreqs = freqs.map((hz) => (hz > 0 ? hz : MIN_FREQ));
-    const name = useAbsolute ? "|Wet - Dry| (dB)" : "Wet - Dry (dB)";
-    return {
-      type: "scatter" as const,
-      mode: "lines" as const,
-      name,
-      x: sanitizedFreqs,
-      y: displayedDiffValues,
-      line: { color: "#ff7b84", width: 2 },
-      hovertemplate: "<b>%{x:.0f} Hz</b><br>%{y:.2f} dB<extra></extra>",
-    };
-  }, [displayedDiffValues, spectra, useAbsolute]);
+  const traces = useMemo<PlotDataArray>(() => {
+    if (!differenceData.freqs) {
+      return [] as PlotDataArray;
+    }
+    const sanitizedFreqs = Float32Array.from(differenceData.freqs, (hz) =>
+      hz > 0 ? hz : MIN_FREQ,
+    );
+    const datasets: PlotDataArray = [];
+    visibleCurves.forEach((id) => {
+      const curve = differenceData.curves[id];
+      if (!curve.available || !curve.values) {
+        return;
+      }
+      const source = curve.values;
+      const yValues =
+        useAbsolute ? Float32Array.from(source, (value) => Math.abs(value)) : source;
+      const hoverParts = [
+        `<b>${curve.label}</b>`,
+        "<br>%{x:.0f} Hz",
+        `<br>${useAbsolute ? "Δ |dB|" : "Δ dB"}: %{y:.2f}`,
+      ];
+      let customdata: Float32Array | undefined;
+      if (curve.phase) {
+        customdata = Float32Array.from(curve.phase);
+        hoverParts.push("<br>Δ Phase: %{customdata:.1f}°");
+      }
+      const trace: PlotDatum = {
+        type: "scatter",
+        mode: "lines",
+        name: curve.label,
+        x: sanitizedFreqs,
+        y: yValues,
+        line: { color: curve.color, width: 2, dash: curve.dash },
+        hovertemplate: `${hoverParts.join("")}<extra></extra>`,
+      };
+      if (customdata) {
+        trace.customdata = customdata;
+      }
+      datasets.push(trace);
+    });
+    return datasets;
+  }, [differenceData.curves, differenceData.freqs, visibleCurves, useAbsolute]);
+
+  const hasActiveCurves = traces.length > 0;
+  const hasDifferenceAvailable = availableCurveIds.length > 0;
+
+  const toggleCurve = useCallback(
+    (id: DifferenceCurveId) => {
+      if (!differenceData.curves[id].available) return;
+      setVisibleCurves((prev) => {
+        const nextSet = new Set(prev);
+        if (nextSet.has(id)) {
+          nextSet.delete(id);
+        } else {
+          nextSet.add(id);
+        }
+        const orderedNext = DEFAULT_VISIBLE_CURVES.filter(
+          (value) => nextSet.has(value) && availableCurveIds.includes(value),
+        ) as DifferenceCurveId[];
+        if (orderedNext.length === 0 && availableCurveIds.length > 0) {
+          nextSet.add(id);
+          const fallback = DEFAULT_VISIBLE_CURVES.filter(
+            (value) => nextSet.has(value) && availableCurveIds.includes(value),
+          ) as DifferenceCurveId[];
+          if (fallback.length === prev.length && fallback.every((value, index) => value === prev[index])) {
+            return prev;
+          }
+          return fallback;
+        }
+        if (orderedNext.length === prev.length && orderedNext.every((value, index) => value === prev[index])) {
+          return prev;
+        }
+        return orderedNext;
+      });
+    },
+    [availableCurveIds, differenceData.curves],
+  );
+
+  const curveStates = DEFAULT_VISIBLE_CURVES.map((id) => differenceData.curves[id]);
 
   useEffect(() => {
-    if (!spectra) return;
+    if (!spectraSet.convolvedA?.wetDb && !spectraSet.convolvedB?.wetDb) {
+      return;
+    }
     resetAxes();
-  }, [spectra, resetAxes]);
+  }, [spectraSet.convolvedA?.wetDb, spectraSet.convolvedB?.wetDb, resetAxes]);
 
   const handleRelayout = (eventData: Partial<Record<string, unknown>>) => {
     if (!eventData) return;
@@ -814,6 +1159,40 @@ export default function FRDifference({
           </button>
         </div>
       </header>
+
+      <div className="frdifference-curve-toggle">
+        <div className="frdifference-section-header">
+          <span className="frdifference-section-label" id={curvesLabelId}>
+            Curves
+          </span>
+        </div>
+        <div
+          className="frdifference-segmented"
+          role="group"
+          aria-labelledby={curvesLabelId}
+        >
+          {curveStates.map((curve) => {
+            const isActive = visibleCurves.includes(curve.id) && curve.available;
+            const disabled = !curve.available;
+            const title = disabled
+              ? curve.disabledReason ?? "Not available"
+              : `Toggle ${curve.label}`;
+            return (
+              <button
+                key={curve.id}
+                type="button"
+                className={`frdifference-segmented__button${isActive ? " is-active" : ""}`}
+                aria-pressed={isActive}
+                onClick={() => toggleCurve(curve.id)}
+                disabled={disabled}
+                title={title ?? undefined}
+              >
+                {curve.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
       <div className="frdifference-grid">
         <section className="frdifference-threshold-card" aria-labelledby={thresholdLabelId}>
@@ -1086,12 +1465,12 @@ export default function FRDifference({
             <div className="frplot-progress__track">
               <div className="frplot-progress__bar" />
             </div>
-            <span className="frplot-progress__label">Preparing difference curve</span>
+            <span className="frplot-progress__label">Preparing difference curves</span>
           </div>
         )}
-        {trace && (
+        {hasActiveCurves && (
           <Plot
-            data={[trace]}
+            data={traces}
             layout={layout}
             config={config}
             useResizeHandler
@@ -1100,7 +1479,10 @@ export default function FRDifference({
             onAfterPlot={handleAfterPlot}
           />
         )}
-        {!isLoading && spectra && spectra.hasIR && !trace && (
+        {!isLoading && !hasDifferenceAvailable && !error && (
+          <div className="frpink-message">Load an impulse response to compute difference curves.</div>
+        )}
+        {!isLoading && hasDifferenceAvailable && !hasActiveCurves && (
           <div className="frpink-message">Rendering difference data...</div>
         )}
       </div>
@@ -1108,13 +1490,13 @@ export default function FRDifference({
   );
 }
 
-function computeDifference(dry: Float32Array, wet: Float32Array): Float32Array {
-  const len = Math.min(dry.length, wet.length);
-  const diff = new Float32Array(len);
+function computeDbDelta(minuend: Float32Array, subtrahend: Float32Array): Float32Array {
+  const len = Math.min(minuend.length, subtrahend.length);
+  const delta = new Float32Array(len);
   for (let i = 0; i < len; i++) {
-    diff[i] = wet[i] - dry[i];
+    delta[i] = minuend[i] - subtrahend[i];
   }
-  return diff;
+  return delta;
 }
 
 function serializeBuffer(buffer: AudioBuffer, label: string) {
