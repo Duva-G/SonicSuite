@@ -79,7 +79,7 @@ type DifferenceCurveMeta = {
   id: DifferenceCurveId;
   label: string;
   color: string;
-  dash: "dash";
+  dash: "solid";
   disabledReason?: string;
 };
 
@@ -92,23 +92,23 @@ type DifferenceCurveData = DifferenceCurveMeta & {
 const DIFFERENCE_CURVE_META: Record<DifferenceCurveId, DifferenceCurveMeta> = {
   origMinusA: {
     id: "origMinusA",
-    label: "Original − A",
+    label: "Original - A",
     color: "#6ea8ff",
-    dash: "dash",
+    dash: "solid",
     disabledReason: "Requires IR A",
   },
   origMinusB: {
     id: "origMinusB",
-    label: "Original − B",
+    label: "Original - B",
     color: "#6fd59a",
-    dash: "dash",
+    dash: "solid",
     disabledReason: "Requires IR B",
   },
   aMinusB: {
     id: "aMinusB",
-    label: "A − B",
+    label: "A - B",
     color: "#f3a762",
-    dash: "dash",
+    dash: "solid",
     disabledReason: "Requires IR B",
   },
 };
@@ -555,7 +555,8 @@ export default function FRDifference({
 
   const displayedDiffValues = useMemo(() => {
     if (!diffValues) return null;
-    return useAbsolute ? absoluteDiffValues ?? null : diffValues;
+    if (useAbsolute) return absoluteDiffValues ?? null;
+    return diffValues.map((value) => -value);
   }, [absoluteDiffValues, diffValues, useAbsolute]);
 
   const metrics = useMemo(() => {
@@ -931,8 +932,9 @@ export default function FRDifference({
         return;
       }
       const source = curve.values;
-      const yValues =
-        useAbsolute ? Float32Array.from(source, (value) => Math.abs(value)) : source;
+      const yValues = useAbsolute
+        ? Float32Array.from(source, (value) => Math.abs(value))
+        : Float32Array.from(source, (value) => -value);
       const hoverParts = [
         `<b>${curve.label}</b>`,
         "<br>%{x:.0f} Hz",

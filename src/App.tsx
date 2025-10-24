@@ -293,6 +293,33 @@ function SonicSuiteApp() {
     }
   }, [availableDifferencePaths, differencePath]);
 
+  const broadcastRouterLatencies = useCallback(() => {
+    const router = auditionRouterRef.current;
+    if (!router) return;
+    router.updateLatencies({
+      A: 0,
+      B: Math.max(0, convolverLatencyRef.current),
+      C: Math.max(0, convolverLatencyCRef.current),
+    });
+  }, [auditionRouterRef, convolverLatencyRef, convolverLatencyCRef]);
+
+  useEffect(() => {
+    if (!irBufRef.current) {
+      convolverLatencyRef.current = 0;
+      broadcastRouterLatencies();
+      return;
+    }
+    const sampleRate =
+      sessionSampleRate > 0
+        ? sessionSampleRate
+        : irBufRef.current.sampleRate > 0
+        ? irBufRef.current.sampleRate
+        : 0;
+    if (sampleRate <= 0) return;
+    convolverLatencyRef.current = Math.max(0, latencySamples / sampleRate);
+    broadcastRouterLatencies();
+  }, [latencySamples, sessionSampleRate, broadcastRouterLatencies]);
+
   const differenceOptions = useMemo(
     () => [
       { value: "origMinusA" as DifferenceMode, label: "Original − A", shortcut: "5", disabled: !canOrigMinusA },
@@ -481,7 +508,10 @@ function SonicSuiteApp() {
       if (slotState.matchGainRef.current) {
         slotState.matchGainRef.current.gain.value = 1;
       }
-      slotState.convolverLatency.current = 0;
+      const latencySamplesValue = computeAnalysisOffset(buf, buf.length);
+      const latencySeconds = latencySamplesValue / buf.sampleRate;
+      slotState.convolverLatency.current = latencySeconds;
+      broadcastRouterLatencies();
 
       if (slotState.shouldResetResiduals) {
         residualBasisRef.current = null;
@@ -522,6 +552,7 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
       setRmsOffsetsDb((prev) => ({ ...prev, [slotState.rmsKey]: 0 }));
       slotState.convolverLatency.current = 0;
       setStatus(`${slotState.label} load failed: ${(err as Error).message}`);
+      broadcastRouterLatencies();
     }
   }
 
@@ -1716,7 +1747,7 @@ ${message}`);
           bandMatchRmsEnabled && bandTrimResult?.trims.B ? bandTrimResult.trims.B : 1;
         const trimB = Math.max(convolvedVol, 1e-6) * bandTrimBValue;
         auditionRouterRef.current?.updateTrims({ B: trimB });
-        auditionRouterRef.current?.updateLatencies({ B: metrics.latencySeconds });
+        broadcastRouterLatencies();
         const offsetDbRaw = 20 * Math.log10(metrics.matchGain);
         const offsetDb = Number.isFinite(offsetDbRaw) ? offsetDbRaw : 0;
         offsetsUpdate.convolvedA = offsetDb;
@@ -1738,7 +1769,7 @@ ${message}`);
           bandMatchRmsEnabled && bandTrimResult?.trims.C ? bandTrimResult.trims.C : 1;
         const trimC = Math.max(bandCVol, 1e-6) * bandTrimCValue;
         auditionRouterRef.current?.updateTrims({ C: trimC });
-        auditionRouterRef.current?.updateLatencies({ C: metrics.latencySeconds });
+        broadcastRouterLatencies();
         const offsetDbRaw = 20 * Math.log10(metrics.matchGain);
         const offsetDb = Number.isFinite(offsetDbRaw) ? offsetDbRaw : 0;
         offsetsUpdate.convolvedB = offsetDb;
@@ -2526,19 +2557,25 @@ function limitPeakInPlace(buf: AudioBuffer, ceilingDb = -0.3) {
 }
 
 function impulseOffset(buf: AudioBuffer): number {
-  const threshold = 0.0005;
-  let minIndex = buf.length;
+  if (buf.length === 0) return 0;
+
+  let peak = 0;
+  let peakIndex = 0;
   for (let ch = 0; ch < buf.numberOfChannels; ch++) {
     const data = buf.getChannelData(ch);
     for (let i = 0; i < buf.length; i++) {
-      if (Math.abs(data[i]) > threshold) {
-        if (i < minIndex) minIndex = i;
-        break;
+      const abs = Math.abs(data[i]);
+      if (abs > peak + 1e-12) {
+        peak = abs;
+        peakIndex = i;
+      } else if (abs > 0 && Math.abs(abs - peak) <= 1e-12 && i < peakIndex) {
+        peakIndex = i;
       }
     }
   }
-  if (!Number.isFinite(minIndex) || minIndex >= buf.length) return 0;
-  return minIndex;
+
+  if (!Number.isFinite(peak) || peak <= 0) return 0;
+  return peakIndex;
 }
 
 function computeAnalysisOffset(irBuffer: AudioBuffer, maxFrames: number): number {
