@@ -179,6 +179,25 @@ export default function FileInputs({
       emitSyntheticChange(file, onPickIRC);
     });
 
+  const musicCardClassName = (() => {
+    const classes = ["file-card", "file-card--music"];
+    if (isMusicDropping) classes.push("file-card--dropping");
+    return classes.join(" ");
+  })();
+
+  const irCardClassName = (() => {
+    const classes = ["file-card", "file-card--ir"];
+    if (isIrDropping) classes.push("file-card--dropping");
+    return classes.join(" ");
+  })();
+
+  const irCCardClassName = (() => {
+    const classes = ["file-card", "file-card--irc"];
+    if (isIrCDropping) classes.push("file-card--dropping");
+    if (irCBuffer) classes.push("file-card--active");
+    return classes.join(" ");
+  })();
+
   return (
     <section className="panel file-panel">
       <div className="panel-header">
@@ -226,7 +245,7 @@ export default function FileInputs({
       <div className="file-card-grid">
         <div className="file-card-stack">
           <label
-            className={`file-card${isMusicDropping ? " file-card--dropping" : ""}`}
+            className={musicCardClassName}
             onDragEnter={handleMusicDragEnter}
             onDragOver={handleMusicDragOver}
             onDragLeave={handleMusicDragLeave}
@@ -279,7 +298,7 @@ export default function FileInputs({
         </div>
         <div className="file-card-stack">
           <label
-            className={`file-card${isIrDropping ? " file-card--dropping" : ""}`}
+            className={irCardClassName}
             onDragEnter={handleIrDragEnter}
             onDragOver={handleIrDragOver}
             onDragLeave={handleIrDragLeave}
@@ -331,9 +350,7 @@ export default function FileInputs({
         {optionalIrVisible && (
           <div className="file-card-stack file-card-stack--optional">
             <label
-              className={`file-card${
-                isIrCDropping ? " file-card--dropping" : ""
-              }${irCBuffer ? " file-card--active" : optionalIrVisible ? " file-card--soft" : ""}`}
+              className={irCCardClassName}
               onDragEnter={handleIrCDragEnter}
               onDragOver={handleIrCDragOver}
               onDragLeave={handleIrCDragLeave}

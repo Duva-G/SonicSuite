@@ -28,6 +28,7 @@ type Props = {
   onSkipForward: () => void;
   onSkipBackward: () => void;
   onResetVolumes: () => void;
+  embedded?: boolean;
 };
 
 type SliderStyle = CSSProperties & { "--progress"?: string };
@@ -126,6 +127,7 @@ export default function Transport({
   onSkipForward,
   onSkipBackward,
   onResetVolumes,
+  embedded = false,
 }: Props) {
   const [isScrubbing, setScrubbing] = useState(false);
   const [pendingPosition, setPendingPosition] = useState(position);
@@ -256,14 +258,18 @@ export default function Transport({
     }
   };
 
+  const containerClassName = embedded ? "transport transport--embedded" : "panel transport-panel";
+
   return (
-    <section className="panel transport-panel">
-      <div className="panel-header">
-        <div>
-          <h2 className="panel-title">Transport</h2>
-          <p className="panel-desc">Preview your mix, pause to tweak, and reset in a click.</p>
+    <section className={containerClassName}>
+      {!embedded && (
+        <div className="panel-header">
+          <div>
+            <h2 className="panel-title">Transport</h2>
+            <p className="panel-desc">Preview your mix, pause to tweak, and reset in a click.</p>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="transport-progress">
         <span className="transport-progress__time">{formatTime(displayPosition)}</span>
