@@ -635,7 +635,7 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
         src.connect(convB).connect(matchGainB);
         router.connectBase("B", matchGainB);
         latencies.B = Math.max(0, convolverLatencyRef.current);
-        trims.B = Math.max(convolvedMatchGain * convolvedVol, 1e-6);
+        trims.B = Math.max(convolvedVol, 1e-6);
       } else {
         convRef.current = null;
         matchGainRef.current = null;
@@ -650,7 +650,7 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
         src.connect(convC).connect(matchGainC);
         router.connectBase("C", matchGainC);
         latencies.C = Math.max(0, convolverLatencyCRef.current);
-        trims.C = Math.max(convolvedCMatchGain * bandCVol, 1e-6);
+        trims.C = Math.max(bandCVol, 1e-6);
       } else {
         convCRef.current = null;
         matchGainCRef.current = null;
@@ -1282,8 +1282,8 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
     if (!bandScopeEngaged) return;
     const trims: Partial<Record<BasePath, number>> = {
       A: Math.max(originalVol, 1e-6),
-      B: hasIrB ? Math.max(convolvedMatchGain * convolvedVol, 1e-6) : undefined,
-      C: hasIrC ? Math.max(convolvedCMatchGain * bandCVol, 1e-6) : undefined,
+      B: hasIrB ? Math.max(convolvedVol, 1e-6) : undefined,
+      C: hasIrC ? Math.max(bandCVol, 1e-6) : undefined,
     };
     if (bandMatchRmsEnabled && bandTrimResult) {
       if (trims.B && bandTrimResult.trims.B) {
@@ -1300,8 +1300,6 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
     bandTrimResult,
     originalVol,
     convolvedVol,
-    convolvedMatchGain,
-    convolvedCMatchGain,
     bandCVol,
     hasIrB,
     hasIrC,
@@ -1714,7 +1712,10 @@ ${message}`);
         if (mode === "original" && gainRef.current) {
           gainRef.current.gain.value = originalVol;
         }
-        auditionRouterRef.current?.updateTrims({ B: metrics.matchGain });
+        const bandTrimBValue =
+          bandMatchRmsEnabled && bandTrimResult?.trims.B ? bandTrimResult.trims.B : 1;
+        const trimB = Math.max(convolvedVol, 1e-6) * bandTrimBValue;
+        auditionRouterRef.current?.updateTrims({ B: trimB });
         auditionRouterRef.current?.updateLatencies({ B: metrics.latencySeconds });
         const offsetDbRaw = 20 * Math.log10(metrics.matchGain);
         const offsetDb = Number.isFinite(offsetDbRaw) ? offsetDbRaw : 0;
@@ -1733,7 +1734,10 @@ ${message}`);
         if (mode === "convolvedB" && gainRef.current) {
           gainRef.current.gain.value = bandCVol;
         }
-        auditionRouterRef.current?.updateTrims({ C: metrics.matchGain });
+        const bandTrimCValue =
+          bandMatchRmsEnabled && bandTrimResult?.trims.C ? bandTrimResult.trims.C : 1;
+        const trimC = Math.max(bandCVol, 1e-6) * bandTrimCValue;
+        auditionRouterRef.current?.updateTrims({ C: trimC });
         auditionRouterRef.current?.updateLatencies({ C: metrics.latencySeconds });
         const offsetDbRaw = 20 * Math.log10(metrics.matchGain);
         const offsetDb = Number.isFinite(offsetDbRaw) ? offsetDbRaw : 0;
