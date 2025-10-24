@@ -215,12 +215,10 @@ async function computeBaseSpectra(
   }
 
   irData = normalizeImpulseResponse(irData);
+  const offset = impulsePeakIndex(irData);
 
   const convolvedFull = convolveFFT(pink, irData);
-  const convolved =
-    convolvedFull.length >= pink.length
-      ? convolvedFull.subarray(0, pink.length)
-      : padToLength(convolvedFull, pink.length);
+  const convolved = extractAlignedSegment(convolvedFull, offset, pink.length);
 
   const pinkRms = computeRms(pink);
   const convRms = computeRms(convolved);
@@ -279,11 +277,11 @@ async function computePlaybackSpectra(
   }
 
   irData = normalizeImpulseResponse(irData);
+  const offset = impulsePeakIndex(irData);
 
   const wetFull = convolveFFT(dry, irData);
   const dryLength = dry.length;
-  const wetTrimmed = new Float32Array(dryLength);
-  wetTrimmed.set(wetFull.subarray(0, dryLength));
+  const wetTrimmed = extractAlignedSegment(wetFull, offset, dryLength);
 
   const dryRms = computeRms(dry);
   const wetRms = computeRms(wetTrimmed);
@@ -616,13 +614,6 @@ function convolveFFT(signal: Float32Array, ir: Float32Array): Float32Array {
   return result;
 }
 
-function padToLength(data: Float32Array, length: number): Float32Array {
-  if (data.length >= length) return data.slice(0, length);
-  const out = new Float32Array(length);
-  out.set(data);
-  return out;
-}
-
 function nextPow2(value: number): number {
   return 1 << Math.ceil(Math.log2(value));
 }
@@ -674,6 +665,36 @@ function resampleLinear(data: Float32Array, srcRate: number, dstRate: number): F
     out[i] = s0 + (s1 - s0) * frac;
   }
   return out;
+}
+
+function impulsePeakIndex(data: Float32Array): number {
+  let peak = 0;
+  let index = 0;
+  for (let i = 0; i < data.length; i++) {
+    const abs = Math.abs(data[i]);
+    if (abs > peak + 1e-12) {
+      peak = abs;
+      index = i;
+    } else if (abs > 0 && Math.abs(abs - peak) <= 1e-12 && i < index) {
+      index = i;
+    }
+  }
+  if (!Number.isFinite(peak) || peak <= 0) return 0;
+  return index;
+}
+
+function extractAlignedSegment(source: Float32Array, offset: number, length: number): Float32Array {
+  const start = Math.min(Math.max(0, Math.floor(offset)), Math.max(0, source.length - 1));
+  const segment = new Float32Array(length);
+  if (source.length === 0 || length === 0) {
+    return segment;
+  }
+  const copyStart = Math.min(start, Math.max(0, source.length - length));
+  const available = Math.min(length, source.length - copyStart);
+  if (available > 0) {
+    segment.set(source.subarray(copyStart, copyStart + available));
+  }
+  return segment;
 }
 
 function hashFloatArray(data: Float32Array, sampleRate: number): string {
