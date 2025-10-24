@@ -46,6 +46,8 @@ export type BlindTestEngine = {
   assets: SnippetAssets | null;
   summary: SessionSummary | null;
   isPreparing: boolean;
+  volume: number;
+  updateVolume: (value: number) => void;
   start: (params: StartParams) => Promise<void>;
   selectVariant: (variant: VariantId) => void;
   togglePlay: () => Promise<void>;
