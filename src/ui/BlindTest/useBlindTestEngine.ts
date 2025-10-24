@@ -15,7 +15,13 @@ import {
   type RoundRating,
 } from "./session";
 import { BlindTestPlayback, type PlaybackStatus } from "./playback";
-import { buildVariantLibrary, createSnippetAssets, type SnippetAssets, type VariantLibrary } from "./snippet";
+import {
+  buildVariantLibrary,
+  createSnippetAssets,
+  SILENCE_RMS_THRESHOLD_DB,
+  type SnippetAssets,
+  type VariantLibrary,
+} from "./snippet";
 
 export type EngineStatus = "idle" | "preparing" | "ready" | "running" | "complete" | "error";
 
@@ -127,6 +133,8 @@ export function useBlindTestEngine(): BlindTestEngine {
       setAssets(snippet);
       const updatedRound: SessionRound = {
         ...round,
+        startSeconds: snippet.startSeconds,
+        endSeconds: snippet.startSeconds + snippet.durationSeconds,
         gainsDb: snippet.gainsDb,
         loudnessDb: snippet.loudnessDb,
         adjustedLoudnessDb: snippet.adjustedLoudnessDb,
@@ -143,12 +151,24 @@ export function useBlindTestEngine(): BlindTestEngine {
       const playback = getPlayback();
       playback.setCrossfadeMs(config.crossfadeMs);
       playback.prepare(snippet.buffers, snippet.gains);
-      setPlaybackStatus(playback.getStatus());
       const availableVariants = (Object.entries(snippet.buffers) as [VariantId, AudioBuffer | undefined][])
-        .filter(([, buffer]) => Boolean(buffer))
+        .filter(([, buffer]) => buffer && buffer.length > 0)
         .map(([variant]) => variant);
+      const audibleVariants = availableVariants.filter((variant) => {
+        const level = snippet.loudnessDb[variant];
+        return level != null && Number.isFinite(level) && level > SILENCE_RMS_THRESHOLD_DB;
+      });
+      if (import.meta.env.DEV) {
+        console.info("[blind-test] prepare", {
+          round: round.index,
+          availableVariants,
+          audibleVariants,
+        });
+      }
+      setPlaybackStatus(audibleVariants.length > 0 ? "ready" : availableVariants.length > 0 ? "ready" : "idle");
       const initialVariant =
-        round.variantOrder.find((variant) => availableVariants.includes(variant)) ??
+        round.variantOrder.find((variant) => audibleVariants.includes(variant)) ??
+        audibleVariants[0] ??
         availableVariants[0] ??
         null;
       if (initialVariant) {
@@ -185,10 +205,10 @@ export function useBlindTestEngine(): BlindTestEngine {
         libraryRef.current = library;
         const nextSession = createSession(configRef.current, music.duration);
         updateSession(nextSession);
-        setStatus("running");
         await prepareRound(0);
         setCurrentIndex(0);
         setPlaybackStatus("ready");
+        setStatus("running");
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setStatus("error");
@@ -208,7 +228,11 @@ export function useBlindTestEngine(): BlindTestEngine {
 
   const togglePlay = useCallback(async () => {
     const playback = getPlayback();
-    if (playback.getStatus() === "playing") {
+    const status = playback.getStatus();
+    if (status === "idle") {
+      return;
+    }
+    if (status === "playing") {
       playback.pause();
       setPlaybackStatus("ready");
     } else {

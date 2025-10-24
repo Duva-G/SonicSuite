@@ -317,11 +317,14 @@ function RoundView(props: ActualRoundProps) {
     [config.anonymize, round.variantOrder],
   );
 
+  const canControlPlayback = playbackStatus !== "idle";
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.repeat) return;
       if (event.key === " ") {
         event.preventDefault();
+        if (!canControlPlayback) return;
         onTogglePlay().catch(() => undefined);
       } else if (event.key === "Enter") {
         event.preventDefault();
@@ -338,7 +341,7 @@ function RoundView(props: ActualRoundProps) {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [onSelectVariant, onSubmit, onTogglePlay, positionMap]);
+  }, [canControlPlayback, onSelectVariant, onSubmit, onTogglePlay, positionMap]);
 
   const isTriStimulus = config.mode === "OAB";
   const isPairwise = config.ratingStyle === "pairwise" || !isTriStimulus;
@@ -450,8 +453,13 @@ function RoundView(props: ActualRoundProps) {
             onClick={() => {
               void onTogglePlay();
             }}
+            disabled={!canControlPlayback}
           >
-            {playbackStatus === "playing" ? "Pause playback" : "Play snippet"}
+            {playbackStatus === "playing"
+              ? "Pause playback"
+              : canControlPlayback
+                ? "Play snippet"
+                : "Loading snippet…"}
             <span className="blind-round__shortcut">Space</span>
           </button>
 

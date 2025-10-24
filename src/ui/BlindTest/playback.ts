@@ -38,7 +38,7 @@ export class BlindTestPlayback {
     this.endedVariants.clear();
 
     (Object.entries(buffers) as [VariantId, AudioBuffer | undefined][]).forEach(([variant, buffer]) => {
-      if (!buffer) return;
+      if (!buffer || buffer.length === 0) return;
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       source.loop = true;
@@ -83,6 +83,14 @@ export class BlindTestPlayback {
     });
     const variant =
       startVariant ?? this.currentVariant ?? (Object.keys(this.sources)[0] as VariantId | undefined) ?? null;
+    if (import.meta.env.DEV) {
+      console.info("[blind-test] play", {
+        requestedVariant: startVariant,
+        chosenVariant: variant,
+        status: this.status,
+        sourceCount: Object.keys(this.sources).length,
+      });
+    }
     if (variant) {
       this.setActiveVariant(variant, true);
     }

@@ -47,8 +47,17 @@ export function getConvolvedBuffer(source: AudioBuffer, ir: AudioBuffer): Promis
 
 export function extractSnippet(buffer: AudioBuffer, startSeconds: number, durationSeconds: number): AudioBuffer {
   const sampleRate = buffer.sampleRate || 44100;
-  const startFrame = Math.min(Math.max(Math.floor(startSeconds * sampleRate), 0), buffer.length);
-  const frameCount = Math.min(Math.max(Math.floor(durationSeconds * sampleRate), 0), buffer.length - startFrame);
+  const totalFrames = buffer.length;
+  if (totalFrames === 0) {
+    return new AudioBuffer({
+      numberOfChannels: buffer.numberOfChannels,
+      length: 0,
+      sampleRate,
+    });
+  }
+  const requestedFrames = Math.max(Math.floor(durationSeconds * sampleRate), 1);
+  const frameCount = Math.min(requestedFrames, totalFrames);
+  const startFrame = clampFrame(Math.floor(startSeconds * sampleRate), 0, totalFrames - 1);
   const snippet = new AudioBuffer({
     numberOfChannels: buffer.numberOfChannels,
     length: frameCount,
@@ -58,8 +67,14 @@ export function extractSnippet(buffer: AudioBuffer, startSeconds: number, durati
     const target = snippet.getChannelData(channel);
     const data = buffer.getChannelData(channel);
     for (let i = 0; i < frameCount; i += 1) {
-      target[i] = data[startFrame + i] ?? 0;
+      const sourceIndex = (startFrame + i) % totalFrames;
+      target[i] = data[sourceIndex] ?? 0;
     }
   }
   return snippet;
+}
+
+function clampFrame(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(Math.max(value, min), max);
 }
