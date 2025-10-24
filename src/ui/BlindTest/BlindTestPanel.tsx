@@ -36,6 +36,19 @@ const DEFAULT_FORM: StartFormValues = {
 
 const CONFIDENCE_OPTIONS: ConfidenceLevel[] = ["low", "medium", "high"];
 
+const MODE_DISPLAY_LABEL: Record<CompareMode, string> = {
+  OA: "O vs A",
+  OB: "O vs B",
+  AB: "A vs B",
+  OAB: "O vs A vs B",
+};
+
+const RANDOMIZATION_DISPLAY_LABEL: Record<SessionConfig["randomization"], string> = {
+  stratified: "Stratified",
+  random: "Pure random",
+  fixed: "Fixed loop",
+};
+
 export default function BlindTestPanel({
   musicBuffer,
   irABuffer,
@@ -98,6 +111,12 @@ export default function BlindTestPanel({
       stop();
     };
   }, [engine.stopPlayback]);
+
+  useEffect(() => {
+    if (engine.status !== "running") {
+      setIsSubmitting(false);
+    }
+  }, [engine.status]);
 
   const handleStart = (values: StartFormValues) => {
     if (!musicBuffer) return;
@@ -164,6 +183,8 @@ export default function BlindTestPanel({
         totalRounds={engine.session.rounds.length}
         round={engine.currentRound}
         config={engine.session.config}
+        volume={engine.volume}
+        onVolumeChange={engine.updateVolume}
         pairChoice={pairChoice}
         onPairChoice={setPairChoice}
         confidence={confidence}
@@ -174,6 +195,7 @@ export default function BlindTestPanel({
         onScoreState={setScoreState}
         playbackStatus={engine.playbackStatus}
         onTogglePlay={engine.togglePlay}
+        onEndEarly={engine.endEarly}
         onSelectVariant={engine.selectVariant}
         selectedVariant={engine.selectedVariant}
         isSubmitting={isSubmitting}
@@ -249,6 +271,9 @@ type ActualRoundProps = {
   onScoreState: (state: ScoreState) => void;
   playbackStatus: BlindTestEngine["playbackStatus"];
   onTogglePlay: () => Promise<void>;
+  onEndEarly: () => void;
+  volume: number;
+  onVolumeChange: (value: number) => void;
   onSelectVariant: (variant: VariantId) => void;
   selectedVariant: VariantId | null;
   isSubmitting: boolean;
@@ -271,6 +296,9 @@ function RoundView(props: ActualRoundProps) {
     onScoreState,
     playbackStatus,
     onTogglePlay,
+    onEndEarly,
+    volume,
+    onVolumeChange,
     onSelectVariant,
     selectedVariant,
     isSubmitting,
@@ -326,18 +354,76 @@ function RoundView(props: ActualRoundProps) {
       (isRank && isRankComplete(rankState, variants)) ||
       (isScore && isScoreComplete(scoreState, variants)));
 
+  const ratingLabel =
+    config.mode === "OAB"
+      ? config.ratingStyle === "score"
+        ? "Score 1–5"
+        : config.ratingStyle === "rank"
+          ? "Rank 1–3"
+          : "Pairwise decision"
+      : "Pairwise decision";
+
+  const randomizationLabel = RANDOMIZATION_DISPLAY_LABEL[config.randomization] ?? config.randomization;
+
+  const metaChips = [
+    { label: "Mode", value: MODE_DISPLAY_LABEL[config.mode] },
+    { label: "Rating", value: ratingLabel },
+    { label: "Snippet", value: `${config.snippetLength}s` },
+    { label: "Crossfade", value: `${config.crossfadeMs} ms` },
+    { label: "Randomization", value: randomizationLabel },
+    { label: "Seed", value: config.seed ? config.seed : "Auto" },
+  ];
+
+  const controlTitle = isPairwise
+    ? "Make your decision"
+    : isRank
+      ? "Rank the variants"
+      : isScore
+        ? "Score the variants"
+        : "Finalize the round";
+
+  const controlSubtitle = isPairwise
+    ? "Numbers 1–3 jump to each variant."
+    : isRank
+      ? "Assign a unique position to every variant."
+      : isScore
+        ? "Set a score from 1 to 5 for each variant."
+        : "Use the controls below to complete the round.";
+
+  const keyboardHint = "Space toggles playback / Enter submits";
+  const showConfidence = config.enableConfidence && isPairwise;
+
   return (
     <div className="blind-round">
       <header className="blind-round__header">
-        <h3>
-          Round {roundIndex + 1}/{totalRounds} - {startTime}-{endTime} - Seed {config.seed || "auto"}
-        </h3>
-        <div className="blind-round__progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)}>
+        <div className="blind-round__title-row">
+          <h3 className="blind-round__title">
+            Round {roundIndex + 1}
+            <span className="blind-round__title-total">/{totalRounds}</span>
+          </h3>
+          <span className="blind-round__time">
+            {startTime} – {endTime}
+          </span>
+        </div>
+        <div className="blind-round__meta">
+          {metaChips.map((item) => (
+            <span key={`${item.label}-${item.value}`} className="blind-round__chip">
+              {item.label} <strong>{item.value}</strong>
+            </span>
+          ))}
+        </div>
+        <div
+          className="blind-round__progress"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(progress)}
+        >
           <div className="blind-round__progress-bar" style={{ width: `${progress}%` }} />
         </div>
       </header>
 
-      <div className="blind-round__variants">
+      <div className="blind-round__panel blind-round__variants">
         {positionMap.map((entry) => (
           <button
             key={entry.variant}
@@ -345,115 +431,159 @@ function RoundView(props: ActualRoundProps) {
             className={`blind-round__variant${selectedVariant === entry.variant ? " is-active" : ""}`}
             onClick={() => onSelectVariant(entry.variant)}
           >
+            <span className="blind-round__variant-index">{entry.idx + 1}</span>
             <span className="blind-round__variant-label">{entry.label}</span>
             {!config.anonymize && <span className="blind-round__variant-sub">{getVariantLabel(entry.variant)}</span>}
           </button>
         ))}
       </div>
 
-      <div className="blind-round__controls">
-        <button
-          type="button"
-          className="control-button blind-round__play"
-          onClick={() => {
-            void onTogglePlay();
-          }}
-        >
-          {playbackStatus === "playing" ? "Pause (Space)" : "Play (Space)"}
-        </button>
-        {isPairwise && (
-          <div className="blind-round__choices">
-            {positionMap.map((entry) => (
-              <label key={entry.variant} className={`blind-round__choice${pairChoice === entry.variant ? " is-selected" : ""}`}>
-                <input
-                  type="radio"
-                  name="pair-choice"
-                  value={entry.variant}
-                  checked={pairChoice === entry.variant}
-                  onChange={() => onPairChoice(entry.variant)}
-                />
-                <span>Prefer {entry.label}</span>
-              </label>
-            ))}
-          </div>
-        )}
+      <div className="blind-round__panel blind-round__controls">
+        <div className="blind-round__controls-header">
+          <p className="blind-round__section-title">{controlTitle}</p>
+          <p className="blind-round__section-subtitle">{controlSubtitle}</p>
+        </div>
+        <div className="blind-round__controls-body">
+          <button
+            type="button"
+            className="control-button blind-round__play"
+            onClick={() => {
+              void onTogglePlay();
+            }}
+          >
+            {playbackStatus === "playing" ? "Pause playback" : "Play snippet"}
+            <span className="blind-round__shortcut">Space</span>
+          </button>
 
-        {isRank && (
-          <div className="blind-round__rank">
-            {positionMap.map((entry) => (
-              <label key={entry.variant}>
-                <span>{entry.label}</span>
-                <select
-                  value={rankState[entry.variant] ?? ""}
-                  onChange={(event) =>
-                    {
-                      const parsed = parseInt(event.target.value, 10);
-                      const next: RankState = { ...rankState };
-                      if (Number.isNaN(parsed)) {
-                        delete next[entry.variant];
-                      } else {
-                        next[entry.variant] = parsed as 1 | 2 | 3;
+          <div className="blind-round__volume blind-round__group">
+            <div className="blind-round__volume-header">
+              <p className="blind-round__group-title">Session volume</p>
+              <span className="blind-round__volume-value">{Math.round(volume * 100)}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={Math.round(volume * 100)}
+              onChange={(event) => onVolumeChange(Number(event.target.value) / 100)}
+              className="blind-round__volume-slider"
+              aria-label="Round playback volume"
+            />
+          </div>
+
+          {isPairwise && (
+            <div className="blind-round__choices blind-round__group">
+              <p className="blind-round__group-title">Pairwise preference</p>
+              <div className="blind-round__chip-row">
+                {positionMap.map((entry) => (
+                  <label key={entry.variant} className={`blind-round__choice${pairChoice === entry.variant ? " is-selected" : ""}`}>
+                    <input
+                      type="radio"
+                      name="pair-choice"
+                      value={entry.variant}
+                      checked={pairChoice === entry.variant}
+                      onChange={() => onPairChoice(entry.variant)}
+                    />
+                    <span>Prefer {entry.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {isRank && (
+            <div className="blind-round__rank blind-round__group">
+              <p className="blind-round__group-title">Rank each variant</p>
+              <div className="blind-round__rank-list">
+                {positionMap.map((entry) => (
+                  <label key={entry.variant}>
+                    <span>{entry.label}</span>
+                    <select
+                      value={rankState[entry.variant] ?? ""}
+                      onChange={(event) =>
+                        {
+                          const parsed = parseInt(event.target.value, 10);
+                          const next: RankState = { ...rankState };
+                          if (Number.isNaN(parsed)) {
+                            delete next[entry.variant];
+                          } else {
+                            next[entry.variant] = parsed as 1 | 2 | 3;
+                          }
+                          onRankState(next);
+                        }
                       }
-                      onRankState(next);
-                    }
-                  }
-                >
-                  <option value="">Rank...</option>
-                  {[1, 2, 3].map((rank) => (
-                    <option key={rank} value={rank} disabled={Object.values(rankState).includes(rank as 1 | 2 | 3) && rankState[entry.variant] !== rank}>
-                      {rank}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ))}
-          </div>
-        )}
+                    >
+                      <option value="">Rank...</option>
+                      {[1, 2, 3].map((rank) => (
+                        <option key={rank} value={rank} disabled={Object.values(rankState).includes(rank as 1 | 2 | 3) && rankState[entry.variant] !== rank}>
+                          {rank}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
 
-        {isScore && (
-          <div className="blind-round__scores">
-            {positionMap.map((entry) => (
-              <label key={entry.variant}>
-                <span>{entry.label}</span>
-                <input
-                  type="range"
-                  min={1}
-                  max={5}
-                  step={1}
-                  value={scoreState[entry.variant] ?? 3}
-                  onChange={(event) =>
-                    onScoreState({
-                      ...scoreState,
-                      [entry.variant]: parseInt(event.target.value, 10),
-                    })
-                  }
-                />
-                <span className="blind-round__score-value">{scoreState[entry.variant] ?? 3}</span>
-              </label>
-            ))}
-          </div>
-        )}
+          {isScore && (
+            <div className="blind-round__scores blind-round__group">
+              <p className="blind-round__group-title">Score each variant</p>
+              <div className="blind-round__score-list">
+                {positionMap.map((entry) => (
+                  <label key={entry.variant}>
+                    <span>{entry.label}</span>
+                    <input
+                      type="range"
+                      min={1}
+                      max={5}
+                      step={1}
+                      value={scoreState[entry.variant] ?? 3}
+                      onChange={(event) =>
+                        onScoreState({
+                          ...scoreState,
+                          [entry.variant]: parseInt(event.target.value, 10),
+                        })
+                      }
+                    />
+                    <span className="blind-round__score-value">{scoreState[entry.variant] ?? 3}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
 
-        {config.enableConfidence && isPairwise && (
-          <div className="blind-round__confidence">
-            {CONFIDENCE_OPTIONS.map((option) => (
-              <label key={option} className={`blind-round__confidence-option${confidence === option ? " is-selected" : ""}`}>
-                <input
-                  type="radio"
-                  name="confidence"
-                  value={option}
-                  checked={confidence === option}
-                  onChange={() => onConfidence(option)}
-                />
-                <span>{option}</span>
-              </label>
-            ))}
-          </div>
-        )}
+          {showConfidence && (
+            <div className="blind-round__confidence blind-round__group">
+              <p className="blind-round__group-title">Confidence</p>
+              <div className="blind-round__chip-row">
+                {CONFIDENCE_OPTIONS.map((option) => (
+                  <label key={option} className={`blind-round__confidence-option${confidence === option ? " is-selected" : ""}`}>
+                    <input
+                      type="radio"
+                      name="confidence"
+                      value={option}
+                      checked={confidence === option}
+                      onChange={() => onConfidence(option)}
+                    />
+                    <span>{option}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
 
-        <button type="button" className="control-button blind-round__submit" onClick={onSubmit} disabled={!canSubmit}>
-          Submit (Enter)
-        </button>
+          <p className="blind-round__hint">{keyboardHint}</p>
+
+          <button type="button" className="control-button blind-round__submit" onClick={onSubmit} disabled={!canSubmit}>
+            Submit round
+            <span className="blind-round__shortcut">Enter</span>
+          </button>
+          <button type="button" className="control-button button-ghost blind-round__end" onClick={onEndEarly}>
+            End test
+          </button>
+        </div>
       </div>
     </div>
   );

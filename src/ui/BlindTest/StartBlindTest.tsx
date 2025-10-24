@@ -56,10 +56,14 @@ export default function StartBlindTest({
   irBName,
 }: Props) {
   const [form, setForm] = useState<StartFormValues>(defaults);
+  const [showRandomizationHelp, setShowRandomizationHelp] = useState(false);
+  const [showPlaybackHelp, setShowPlaybackHelp] = useState(false);
   const seedFieldId = useId();
   const fixedStartId = useId();
   const roundsId = useId();
   const snippetId = useId();
+  const randomizationHelpId = useId();
+  const playbackHelpId = useId();
 
   const modeOptions = useMemo<ModeOption[]>(() => {
     const entries: ModeOption[] = (Object.keys(MODE_LABEL) as CompareMode[]).map((mode) => ({
@@ -171,7 +175,49 @@ export default function StartBlindTest({
 
         <section className="blind-start__surface">
           <div className="blind-fieldset">
-            <p className="blind-fieldset__title">Randomization</p>
+            <div className="blind-fieldset__header">
+              <p className="blind-fieldset__title">Randomization</p>
+              <button
+                type="button"
+                className={`blind-help-button${showRandomizationHelp ? " is-active" : ""}`}
+                onClick={() => setShowRandomizationHelp((prev) => !prev)}
+                aria-label="Explain randomization settings"
+                aria-expanded={showRandomizationHelp}
+                aria-controls={randomizationHelpId}
+              >
+                ?
+              </button>
+            </div>
+            {showRandomizationHelp ? (
+              <div className="blind-help-panel" id={randomizationHelpId} role="note">
+                <p className="blind-help-panel__intro">Choose how snippets are scheduled:</p>
+                <ul className="blind-help-panel__list">
+                  <li>
+                    <strong>Stratified:</strong> rotates variants and start points so each one is heard the same number
+                    of times.
+                  </li>
+                  <li>
+                    <strong>Pure random:</strong> shuffles every round independently for maximum unpredictability.
+                  </li>
+                  <li>
+                    <strong>Fixed loop:</strong> repeats a consistent sequence. Use &ldquo;Fixed start&rdquo; to set the
+                    starting offset.
+                  </li>
+                </ul>
+                <p className="blind-help-panel__intro">Toggles:</p>
+                <ul className="blind-help-panel__list">
+                  <li>
+                    <strong>LUFS match variants:</strong> normalizes loudness before each comparison.
+                  </li>
+                  <li>
+                    <strong>Anonymize variant labels:</strong> hides file names so listeners only see O/A/B.
+                  </li>
+                  <li>
+                    <strong>Capture confidence:</strong> adds a quick confidence pick to pairwise ratings.
+                  </li>
+                </ul>
+              </div>
+            ) : null}
             <div className="blind-pill-group" role="radiogroup" aria-label="Randomization mode">
               {(Object.keys(RANDOMIZATION_LABEL) as RandomizationMode[]).map((value) => (
                 <label key={value} className="blind-pill">
@@ -232,7 +278,27 @@ export default function StartBlindTest({
 
         <section className="blind-start__surface">
           <div className="blind-fieldset">
-            <p className="blind-fieldset__title">Playback</p>
+            <div className="blind-fieldset__header">
+              <p className="blind-fieldset__title">Playback</p>
+              <button
+                type="button"
+                className={`blind-help-button${showPlaybackHelp ? " is-active" : ""}`}
+                onClick={() => setShowPlaybackHelp((prev) => !prev)}
+                aria-label="Explain playback settings"
+                aria-expanded={showPlaybackHelp}
+                aria-controls={playbackHelpId}
+              >
+                ?
+              </button>
+            </div>
+            {showPlaybackHelp ? (
+              <div className="blind-help-panel" id={playbackHelpId} role="note">
+                <p className="blind-help-panel__intro">
+                  Crossfade sets how long to blend between variants when you switch. Higher values give smoother
+                  transitions and hide clicks, while lower values jump faster.
+                </p>
+              </div>
+            ) : null}
             <div className="blind-pill-group" role="radiogroup" aria-label="Crossfade duration">
               {CROSSFADE_OPTIONS.map((value) => (
                 <label key={value} className="blind-pill">

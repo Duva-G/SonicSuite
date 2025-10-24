@@ -49,10 +49,20 @@ export type BlindTestEngine = {
   submitScores: (scores: ScoreInput) => void;
   nextRound: () => Promise<void>;
   restart: () => void;
+  endEarly: () => void;
   exportCsv: () => Blob | null;
 };
 
+const MIN_VOLUME_DB = -50;
+
+function volumeSliderToGain(value: number): number {
+  if (value <= 0) return 0;
+  const db = MIN_VOLUME_DB * (1 - value);
+  return Math.pow(10, db / 20);
+}
+
 export function useBlindTestEngine(): BlindTestEngine {
+
   const [status, setStatus] = useState<EngineStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [session, setSession] = useState<SessionState | null>(null);
@@ -61,12 +71,14 @@ export function useBlindTestEngine(): BlindTestEngine {
   const [assets, setAssets] = useState<SnippetAssets | null>(null);
   const [summary, setSummary] = useState<SessionSummary | null>(null);
   const [playbackStatus, setPlaybackStatus] = useState<PlaybackStatus>("idle");
+  const [volume, setVolume] = useState<number>(1);
 
   const playbackRef = useRef<BlindTestPlayback | null>(null);
   const libraryRef = useRef<VariantLibrary | null>(null);
   const configRef = useRef<SessionConfig | null>(null);
   const musicRef = useRef<AudioBuffer | null>(null);
   const sessionRef = useRef<SessionState | null>(null);
+  const volumeRef = useRef<number>(1);
 
   const updateSession = useCallback(
     (
@@ -98,6 +110,7 @@ export function useBlindTestEngine(): BlindTestEngine {
           setPlaybackStatus("ended");
         },
       });
+      playbackRef.current.setVolume(volumeSliderToGain(volumeRef.current));
     }
     return playbackRef.current;
   }, []);
@@ -131,10 +144,18 @@ export function useBlindTestEngine(): BlindTestEngine {
       playback.setCrossfadeMs(config.crossfadeMs);
       playback.prepare(snippet.buffers, snippet.gains);
       setPlaybackStatus(playback.getStatus());
-      const firstVariant = round.variantOrder[0] ?? null;
-      if (firstVariant) {
-        playback.setActiveVariant(firstVariant, true);
-        setSelectedVariant(firstVariant);
+      const availableVariants = (Object.entries(snippet.buffers) as [VariantId, AudioBuffer | undefined][])
+        .filter(([, buffer]) => Boolean(buffer))
+        .map(([variant]) => variant);
+      const initialVariant =
+        round.variantOrder.find((variant) => availableVariants.includes(variant)) ??
+        availableVariants[0] ??
+        null;
+      if (initialVariant) {
+        playback.setActiveVariant(initialVariant, true);
+        setSelectedVariant(initialVariant);
+      } else {
+        setSelectedVariant(null);
       }
       return snippet;
     },
@@ -147,6 +168,9 @@ export function useBlindTestEngine(): BlindTestEngine {
       setError(null);
       setSummary(null);
       updateSession(null);
+      volumeRef.current = 1;
+      setVolume(1);
+      playbackRef.current?.setVolume(volumeSliderToGain(1));
       setAssets(null);
       setSelectedVariant(null);
       setCurrentIndex(0);
@@ -192,6 +216,16 @@ export function useBlindTestEngine(): BlindTestEngine {
       setPlaybackStatus("playing");
     }
   }, [getPlayback, selectedVariant]);
+
+  const updateVolume = useCallback(
+    (value: number) => {
+      const clamped = Math.min(Math.max(value, 0), 1);
+      volumeRef.current = clamped;
+      setVolume(clamped);
+      playbackRef.current?.setVolume(volumeSliderToGain(clamped));
+    },
+    [],
+  );
 
   const stopPlayback = useCallback(() => {
     playbackRef.current?.stop();
@@ -249,6 +283,15 @@ export function useBlindTestEngine(): BlindTestEngine {
     [stopPlayback],
   );
 
+  const endEarly = useCallback(() => {
+    const currentSession = sessionRef.current;
+    if (!currentSession) return;
+    stopPlayback();
+    const report = computeSessionSummary(currentSession);
+    setSummary(report);
+    setStatus("complete");
+  }, [stopPlayback]);
+
   const nextRound = useCallback(async () => {
     const currentSession = sessionRef.current;
     if (!currentSession) return;
@@ -272,7 +315,10 @@ export function useBlindTestEngine(): BlindTestEngine {
     setSelectedVariant(null);
     setCurrentIndex(0);
     setPlaybackStatus("idle");
+    volumeRef.current = 1;
+    setVolume(1);
     playbackRef.current?.stop();
+    playbackRef.current?.setVolume(volumeSliderToGain(1));
   }, [updateSession]);
 
   const exportCsv = useCallback((): Blob | null => {
@@ -336,6 +382,25 @@ export function useBlindTestEngine(): BlindTestEngine {
 
   const isPreparing = status === "preparing";
 
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const handleModalClose = () => {
+      const playback = playbackRef.current;
+      if (!playback) return;
+      const status = playback.getStatus();
+      if (status === "playing" || status === "ready") {
+        playback.stop();
+        const nextGain = volumeSliderToGain(volumeRef.current);
+        playback.setVolume(nextGain);
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleModalClose);
+    return () => {
+      document.removeEventListener("visibilitychange", handleModalClose);
+    };
+  }, []);
+
   return {
     status,
     error,
@@ -351,6 +416,9 @@ export function useBlindTestEngine(): BlindTestEngine {
     selectVariant,
     togglePlay,
     stopPlayback,
+    volume,
+    updateVolume,
+    endEarly,
     submitPairwise,
     submitRank,
     submitScores,

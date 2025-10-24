@@ -41,6 +41,9 @@ export class BlindTestPlayback {
       if (!buffer) return;
       const source = ctx.createBufferSource();
       source.buffer = buffer;
+      source.loop = true;
+      source.loopStart = 0;
+      source.loopEnd = buffer.duration;
       source.onended = () => this.handleEnded(variant);
 
       const loudnessGain = ctx.createGain();
@@ -92,6 +95,15 @@ export class BlindTestPlayback {
     this.status = "ready";
   }
 
+  setVolume(linear: number) {
+    const gain = this.getMasterGain();
+    gain.gain.value = Math.max(0, linear);
+  }
+
+  getVolume(): number {
+    return this.master?.gain.value ?? 1;
+  }
+
   stop() {
     if (this.status === "idle") return;
     this.disposeSources();
@@ -100,15 +112,26 @@ export class BlindTestPlayback {
 
   setActiveVariant(variant: VariantId, immediate = false) {
     if (!this.ctx) return;
+    const entries = Object.entries(this.mixGains) as [VariantId, GainNode | undefined][];
+    const fallback = entries.find(([, gainNode]) => gainNode)?.[0] ?? null;
+    const targetVariant = entries.some(([key, gainNode]) => key === variant && gainNode) ? variant : fallback;
+    if (!targetVariant) {
+      this.currentVariant = null;
+      return;
+    }
     const now = this.ctx.currentTime;
-    const fade = immediate ? 0 : Math.max(this.crossfadeSeconds, 0.001);
-    (Object.entries(this.mixGains) as [VariantId, GainNode | undefined][]).forEach(([key, gainNode]) => {
+    const fade = Math.max(this.crossfadeSeconds, 0.001);
+    entries.forEach(([key, gainNode]) => {
       if (!gainNode) return;
-      const target = key === variant ? 1 : 0;
+      const target = key === targetVariant ? 1 : 0;
       gainNode.gain.cancelScheduledValues(now);
-      gainNode.gain.setTargetAtTime(target, now, fade);
+      if (immediate) {
+        gainNode.gain.setValueAtTime(target, now);
+      } else {
+        gainNode.gain.setTargetAtTime(target, now, fade);
+      }
     });
-    this.currentVariant = variant;
+    this.currentVariant = targetVariant;
   }
 
   getStatus(): PlaybackStatus {
@@ -139,9 +162,10 @@ export class BlindTestPlayback {
   }
 
   private getMasterGain(): GainNode {
-    if (!this.master && this.ctx) {
-      this.master = this.ctx.createGain();
-      this.master.connect(this.ctx.destination);
+    const ctx = this.getContext();
+    if (!this.master) {
+      this.master = ctx.createGain();
+      this.master.connect(ctx.destination);
     }
     return this.master!;
   }
@@ -166,7 +190,7 @@ export class BlindTestPlayback {
     this.endedVariants.add(variant);
     const keys = Object.keys(this.sources) as VariantId[];
     const done = keys.length > 0 && keys.every((key) => this.endedVariants.has(key));
-    if (done) {
+    if (done && this.status === "playing") {
       this.status = "ended";
       this.callbacks.onEnded?.();
     }
