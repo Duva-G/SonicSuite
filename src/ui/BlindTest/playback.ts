@@ -29,8 +29,9 @@ export class BlindTestPlayback {
   }
 
   prepare(buffers: Partial<Record<VariantId, AudioBuffer>>, gains?: Partial<Record<VariantId, number>>) {
+    const hadSources = this.hasSources();
     this.disposeSources();
-    this.getContext();
+    this.getContext(hadSources);
     const ctx = this.ctx!;
     const master = this.getMasterGain();
     const sources: SourceMap = {};
@@ -62,14 +63,36 @@ export class BlindTestPlayback {
 
     this.sources = sources;
     this.mixGains = mixNodes;
+    if (import.meta.env.DEV) {
+      console.info("[blind-test] preparePlayback", {
+        variants: Object.keys(sources),
+        durations: Object.fromEntries(
+          Object.entries(sources).map(([variant, source]) => [variant, source?.buffer?.duration ?? null]),
+        ),
+        recycledContext: hadSources,
+      });
+    }
     this.status = Object.keys(sources).length > 0 ? "ready" : "idle";
   }
 
   async play(startVariant: VariantId | null = null) {
     if (this.status === "playing") return;
+    if (!this.hasSources()) {
+      if (import.meta.env.DEV) {
+        console.info("[blind-test] play-skip", { reason: "no-sources" });
+      }
+      return;
+    }
     const ctx = this.getContext();
     if (ctx.state === "suspended") {
       await ctx.resume();
+    }
+    if (import.meta.env.DEV) {
+      console.info("[blind-test] play-init", {
+        ctxState: ctx.state,
+        status: this.status,
+        sourceCount: Object.keys(this.sources).length,
+      });
     }
     Object.values(this.sources).forEach((source) => {
       if (!source) return;
@@ -143,6 +166,9 @@ export class BlindTestPlayback {
   }
 
   getStatus(): PlaybackStatus {
+    if (this.status === "idle" && this.hasSources()) {
+      return "ready";
+    }
     return this.status;
   }
 
@@ -162,9 +188,18 @@ export class BlindTestPlayback {
     this.master = null;
   }
 
-  private getContext(): AudioContext {
-    if (!this.ctx) {
+  private getContext(forceNew = false): AudioContext {
+    if (!this.ctx || forceNew) {
+      if (forceNew) {
+        this.ctx?.close().catch(() => undefined);
+      }
       this.ctx = new AudioContext();
+      if (import.meta.env.DEV) {
+        console.info("[blind-test] createContext", {
+          sampleRate: this.ctx.sampleRate,
+          state: this.ctx.state,
+        });
+      }
     }
     return this.ctx;
   }
@@ -179,6 +214,9 @@ export class BlindTestPlayback {
   }
 
   private disposeSources() {
+    if (import.meta.env.DEV) {
+      console.info("[blind-test] disposeSources");
+    }
     Object.values(this.sources).forEach((source) => {
       try {
         source?.stop();
@@ -202,5 +240,9 @@ export class BlindTestPlayback {
       this.status = "ended";
       this.callbacks.onEnded?.();
     }
+  }
+
+  private hasSources(): boolean {
+    return Object.values(this.sources).some((source) => !!source);
   }
 }

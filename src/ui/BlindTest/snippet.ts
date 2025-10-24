@@ -6,6 +6,8 @@ import type { SessionRound, VariantId } from "./session";
 export type VariantLibrary = Partial<Record<VariantId, AudioBuffer>>;
 
 export const SILENCE_RMS_THRESHOLD_DB = -120;
+const PRACTICAL_SILENCE_DB = -70;
+const PRACTICAL_SILENCE_RETRY_LIMIT = 6;
 
 export type SnippetAssets = {
   buffers: Partial<Record<VariantId, AudioBuffer>>;
@@ -65,21 +67,87 @@ export function createSnippetAssets(
     });
   };
 
+  const clearSnippets = () => {
+    round.variantOrder.forEach((variant) => {
+      delete buffers[variant];
+      delete loudnessDb[variant];
+    });
+  };
+
+  const getMaxMeasuredDb = () => {
+    let maxDb = Number.NEGATIVE_INFINITY;
+    round.variantOrder.forEach((variant) => {
+      const level = loudnessDb[variant];
+      if (typeof level === "number" && Number.isFinite(level)) {
+        maxDb = Math.max(maxDb, level);
+      }
+    });
+    return maxDb;
+  };
+
   populateSnippets(effectiveStartSeconds, effectiveDuration);
+
+  let maxMeasuredDb = getMaxMeasuredDb();
+  let bestMaxMeasuredDb = maxMeasuredDb;
+  let bestStartSeconds = effectiveStartSeconds;
+  let bestDurationSeconds = effectiveDuration;
+  let retryAttempts = 0;
+
+  if (maxMeasuredDb < PRACTICAL_SILENCE_DB && maxStartSeconds > 0) {
+    let foundPracticalSnippet = false;
+    for (let attempt = 0; attempt < PRACTICAL_SILENCE_RETRY_LIMIT; attempt += 1) {
+      retryAttempts = attempt + 1;
+      const tryStartSeconds = clampSeconds(Math.random() * maxStartSeconds, 0, maxStartSeconds);
+      const tryDuration = Math.max(0.001, Math.min(maxDuration, usableDuration - tryStartSeconds || maxDuration));
+      clearSnippets();
+      populateSnippets(tryStartSeconds, tryDuration);
+      const attemptMaxDb = getMaxMeasuredDb();
+      if (attemptMaxDb > bestMaxMeasuredDb) {
+        bestMaxMeasuredDb = attemptMaxDb;
+        bestStartSeconds = tryStartSeconds;
+        bestDurationSeconds = tryDuration;
+      }
+      if (attemptMaxDb >= PRACTICAL_SILENCE_DB) {
+        maxMeasuredDb = attemptMaxDb;
+        effectiveStartSeconds = tryStartSeconds;
+        effectiveDuration = tryDuration;
+        foundPracticalSnippet = true;
+        break;
+      }
+      maxMeasuredDb = attemptMaxDb;
+    }
+
+    if (!foundPracticalSnippet) {
+      effectiveStartSeconds = bestStartSeconds;
+      effectiveDuration = bestDurationSeconds;
+      clearSnippets();
+      populateSnippets(effectiveStartSeconds, effectiveDuration);
+      maxMeasuredDb = bestMaxMeasuredDb;
+    }
+  }
 
   const allSilent = round.variantOrder.every((variant) => {
     const level = loudnessDb[variant];
     return level == null || !Number.isFinite(level) || level <= SILENCE_RMS_THRESHOLD_DB;
   });
 
-  if (allSilent) {
-    round.variantOrder.forEach((variant) => {
-      delete buffers[variant];
-      delete loudnessDb[variant];
-    });
+  const shouldFallback = allSilent || maxMeasuredDb < PRACTICAL_SILENCE_DB;
+
+  if (shouldFallback) {
+    const fallbackMaxDb = maxMeasuredDb;
+    clearSnippets();
     effectiveStartSeconds = 0;
     effectiveDuration = maxDuration;
     populateSnippets(effectiveStartSeconds, effectiveDuration);
+    if (import.meta.env.DEV) {
+      console.info("[blind-test] snippet fallback", {
+        round: round.index,
+        reason: allSilent ? "all-silent" : "too-quiet",
+        attempts: retryAttempts,
+        lastMaxDb: Number.isFinite(fallbackMaxDb) ? fallbackMaxDb : null,
+      });
+    }
+    maxMeasuredDb = getMaxMeasuredDb();
   }
 
   const representative = buffers[round.variantOrder[0] as VariantId] ?? buffers.O ?? buffers.A ?? buffers.B ?? null;
@@ -92,6 +160,9 @@ export function createSnippetAssets(
       effectiveStart: effectiveStartSeconds.toFixed(3),
       duration: snippetDuration.toFixed(3),
       loudnessDb,
+      maxMeasuredDb: Number.isFinite(maxMeasuredDb) ? maxMeasuredDb : null,
+      bestMaxMeasuredDb: Number.isFinite(bestMaxMeasuredDb) ? bestMaxMeasuredDb : null,
+      retries: retryAttempts,
     });
   }
 

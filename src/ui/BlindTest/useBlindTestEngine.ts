@@ -128,9 +128,32 @@ export function useBlindTestEngine(): BlindTestEngine {
       const currentSession = sessionRef.current;
       const library = libraryRef.current;
       const config = configRef.current;
-      if (!currentSession || !library || !config) return null;
+      if (import.meta.env.DEV) {
+        console.info("[blind-test] prepareRound:start", {
+          roundIndex,
+          hasSession: !!currentSession,
+          sessionRounds: currentSession?.rounds.length ?? 0,
+          hasLibrary: !!library,
+          hasConfig: !!config,
+        });
+      }
+      if (!currentSession || !library || !config) {
+        if (import.meta.env.DEV) {
+          console.warn("[blind-test] prepareRound:missing-context", {
+            hasSession: !!currentSession,
+            hasLibrary: !!library,
+            hasConfig: !!config,
+          });
+        }
+        return null;
+      }
       const round = currentSession.rounds[roundIndex];
-      if (!round) return null;
+      if (!round) {
+        if (import.meta.env.DEV) {
+          console.warn("[blind-test] prepareRound:no-round", { roundIndex });
+        }
+        return null;
+      }
       const snippet = createSnippetAssets(library, round, config.snippetLength, config.lufsMatch);
       setAssets(snippet);
       const updatedRound: SessionRound = {
@@ -153,6 +176,13 @@ export function useBlindTestEngine(): BlindTestEngine {
       const playback = getPlayback();
       playback.setCrossfadeMs(config.crossfadeMs);
       playback.prepare(snippet.buffers, snippet.gains);
+      if (import.meta.env.DEV) {
+        console.info("[blind-test] prepareRound:prepared", {
+          round: round.index,
+          variants: round.variantOrder,
+          hasBuffers: Object.keys(snippet.buffers).length,
+        });
+      }
       const availableVariants = (Object.entries(snippet.buffers) as [VariantId, AudioBuffer | undefined][])
         .filter(([, buffer]) => buffer && buffer.length > 0)
         .map(([variant]) => variant);
@@ -186,6 +216,14 @@ export function useBlindTestEngine(): BlindTestEngine {
 
   const start = useCallback(
     async ({ config, music, irA, irB }: StartParams) => {
+      if (import.meta.env.DEV) {
+        console.info("[blind-test] start", {
+          snippetLength: config.snippetLength,
+          rounds: config.rounds,
+          hasIrA: !!irA,
+          hasIrB: !!irB,
+        });
+      }
       setStatus("preparing");
       setError(null);
       setSummary(null);
@@ -206,6 +244,7 @@ export function useBlindTestEngine(): BlindTestEngine {
         const library = await buildVariantLibrary(music, irA ?? null, irB ?? null);
         libraryRef.current = library;
         const nextSession = createSession(configRef.current, music.duration);
+        sessionRef.current = nextSession;
         updateSession(nextSession);
         await prepareRound(0);
         setCurrentIndex(0);
@@ -231,6 +270,13 @@ export function useBlindTestEngine(): BlindTestEngine {
   const togglePlay = useCallback(async () => {
     const playback = getPlayback();
     const status = playback.getStatus();
+    if (import.meta.env.DEV) {
+      console.info("[blind-test] togglePlay", {
+        internalStatus: status,
+        selectedVariant,
+        uiStatus: playbackStatus,
+      });
+    }
     if (status === "idle") {
       return;
     }
@@ -241,7 +287,7 @@ export function useBlindTestEngine(): BlindTestEngine {
       await playback.play(selectedVariant);
       setPlaybackStatus("playing");
     }
-  }, [getPlayback, selectedVariant]);
+  }, [getPlayback, playbackStatus, selectedVariant]);
 
   const updateVolume = useCallback(
     (value: number) => {
