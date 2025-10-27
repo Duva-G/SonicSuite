@@ -29,6 +29,10 @@ type Props = {
   onSkipBackward: () => void;
   onResetVolumes: () => void;
   embedded?: boolean;
+  onMatchRms: () => void;
+  canMatchRms: boolean;
+  isMatchingRms: boolean;
+  isRmsMatched: boolean;
 };
 
 type SliderStyle = CSSProperties & { "--progress"?: string };
@@ -128,6 +132,10 @@ export default function Transport({
   onSkipBackward,
   onResetVolumes,
   embedded = false,
+  onMatchRms,
+  canMatchRms,
+  isMatchingRms,
+  isRmsMatched,
 }: Props) {
   const [isScrubbing, setScrubbing] = useState(false);
   const [pendingPosition, setPendingPosition] = useState(position);
@@ -147,6 +155,10 @@ export default function Transport({
 
   const isReady = duration > 0;
   const displayPosition = isScrubbing ? pendingPosition : position;
+
+  const rmsLabel = isMatchingRms ? "Matching..." : isRmsMatched ? "RMS Matched" : "Match RMS";
+  const rmsDisabled = isMatchingRms || !canMatchRms;
+  const [areVolumesOpen, setVolumesOpen] = useState(true);
 
   const progressPercent = useMemo(() => {
     if (!isReady || duration <= 0) return 0;
@@ -260,6 +272,10 @@ export default function Transport({
 
   const containerClassName = embedded ? "transport transport--embedded" : "panel transport-panel";
 
+  const toggleVolumes = () => {
+    setVolumesOpen((prev) => !prev);
+  };
+
   return (
     <section className={containerClassName}>
       {!embedded && (
@@ -293,6 +309,17 @@ export default function Transport({
       </div>
 
       <div className="transport-controls">
+        <button
+          type="button"
+          className={`control-button button-ghost rms-match__button transport-rms-button${
+            isRmsMatched ? " is-matched" : ""
+          }`}
+          onClick={onMatchRms}
+          disabled={rmsDisabled}
+          aria-pressed={isRmsMatched}
+        >
+          {rmsLabel}
+        </button>
         <div className="transport-controls__cluster">
           <button
             type="button"
@@ -329,9 +356,17 @@ export default function Transport({
         </button>
       </div>
 
-      <div className="volume-group">
+      <div className="volume-group" data-open={areVolumesOpen}>
         <div className="volume-group__header">
-          <span className="volume-group__caption">Volume controls</span>
+          <button
+            type="button"
+            className="volume-group__toggle"
+            onClick={toggleVolumes}
+            aria-expanded={areVolumesOpen}
+          >
+            <span className="volume-group__caption">Volume controls</span>
+            <span className="volume-group__chevron" aria-hidden="true" />
+          </button>
           <button
             type="button"
             className="control-button button-ghost volume-reset-button"
@@ -341,147 +376,149 @@ export default function Transport({
           </button>
         </div>
 
-        <label className="volume-control">
-          <span className="volume-label">
-            Original Volume
-            <span className="volume-label__meta">RMS offset {formatDb(rmsOffsetsDb.original)}</span>
-          </span>
-          <div className="volume-slider">
-            <input
-              className="volume-slider__input"
-              type="range"
-              min={ORIGCONV_DB_MIN}
-              max={ORIGCONV_DB_MAX}
-              step={0.1}
-              value={originalVolDb}
-              onChange={(event) =>
-                onChangeOriginalVol(
-                  dbToLinearWithRange(Number(event.target.value), ORIGCONV_DB_MIN, ORIGCONV_DB_MAX),
-                )
-              }
-              aria-valuemin={ORIGCONV_DB_MIN}
-              aria-valuemax={ORIGCONV_DB_MAX}
-              aria-valuenow={originalVolDb}
-              aria-valuetext={formatDb(originalVolDb)}
-              style={originalVolumeStyle}
-              title={originalVolumeTooltip}
-            />
-            <div className="volume-slider__labels" aria-hidden="true">
-              <span>-6 dB</span>
-              <span>0 dB</span>
-              <span>+6 dB</span>
-            </div>
-            <span className={`volume-value volume-value--${originalVolumeTone}`}>
-              {formatDb(originalVolDb)}
+        <div className="volume-group__body" hidden={!areVolumesOpen} aria-hidden={!areVolumesOpen}>
+          <label className="volume-control">
+            <span className="volume-label">
+              Original Volume
+              <span className="volume-label__meta">RMS offset {formatDb(rmsOffsetsDb.original)}</span>
             </span>
-          </div>
-        </label>
-
-        <label className="volume-control">
-          <span className="volume-label">
-            Convolved A Volume
-            <span className="volume-label__meta">RMS offset {formatDb(rmsOffsetsDb.convolvedA)}</span>
-          </span>
-          <div className="volume-slider">
-            <input
-              className="volume-slider__input"
-              type="range"
-              min={ORIGCONV_DB_MIN}
-              max={ORIGCONV_DB_MAX}
-              step={0.1}
-              value={convolvedVolDb}
-              onChange={(event) =>
-                onChangeConvolvedVol(
-                  dbToLinearWithRange(Number(event.target.value), ORIGCONV_DB_MIN, ORIGCONV_DB_MAX),
-                )
-              }
-              aria-valuemin={ORIGCONV_DB_MIN}
-              aria-valuemax={ORIGCONV_DB_MAX}
-              aria-valuenow={convolvedVolDb}
-              aria-valuetext={formatDb(convolvedVolDb)}
-              style={convolvedVolumeStyle}
-              disabled={convolvedDisabled}
-              title={convolvedVolumeTooltip}
-            />
-            <div className="volume-slider__labels" aria-hidden="true">
-              <span>-6 dB</span>
-              <span>0 dB</span>
-              <span>+6 dB</span>
+            <div className="volume-slider">
+              <input
+                className="volume-slider__input"
+                type="range"
+                min={ORIGCONV_DB_MIN}
+                max={ORIGCONV_DB_MAX}
+                step={0.1}
+                value={originalVolDb}
+                onChange={(event) =>
+                  onChangeOriginalVol(
+                    dbToLinearWithRange(Number(event.target.value), ORIGCONV_DB_MIN, ORIGCONV_DB_MAX),
+                  )
+                }
+                aria-valuemin={ORIGCONV_DB_MIN}
+                aria-valuemax={ORIGCONV_DB_MAX}
+                aria-valuenow={originalVolDb}
+                aria-valuetext={formatDb(originalVolDb)}
+                style={originalVolumeStyle}
+                title={originalVolumeTooltip}
+              />
+              <div className="volume-slider__labels" aria-hidden="true">
+                <span>-6 dB</span>
+                <span>0 dB</span>
+                <span>+6 dB</span>
+              </div>
+              <span className={`volume-value volume-value--${originalVolumeTone}`}>
+                {formatDb(originalVolDb)}
+              </span>
             </div>
-            <span className={`volume-value volume-value--${convolvedVolumeTone}`}>
-              {formatDb(convolvedVolDb)}
+          </label>
+
+          <label className="volume-control">
+            <span className="volume-label">
+              Convolved A Volume
+              <span className="volume-label__meta">RMS offset {formatDb(rmsOffsetsDb.convolvedA)}</span>
             </span>
-          </div>
-        </label>
-
-        <label className="volume-control">
-          <span className="volume-label">
-            Convolved B Volume
-            <span className="volume-label__meta">RMS offset {formatDb(rmsOffsetsDb.convolvedB)}</span>
-          </span>
-          <div className="volume-slider">
-            <input
-              className="volume-slider__input"
-              type="range"
-              min={CONVB_DB_MIN}
-              max={CONVB_DB_MAX}
-              step={0.1}
-              value={convolvedBVolDb}
-              onChange={(event) => {
-                if (!onChangeConvolvedBVol) return;
-                onChangeConvolvedBVol(
-                  dbToLinearWithRange(Number(event.target.value), CONVB_DB_MIN, CONVB_DB_MAX),
-                );
-              }}
-              aria-valuemin={CONVB_DB_MIN}
-              aria-valuemax={CONVB_DB_MAX}
-              aria-valuenow={convolvedBVolDb}
-              aria-valuetext={formatDb(convolvedBVolDb)}
-              style={convolvedBVolumeStyle}
-              disabled={convolvedBDisabled || !onChangeConvolvedBVol}
-              title={convolvedBVolumeTooltip}
-            />
-            <div className="volume-slider__labels" aria-hidden="true">
-              <span>-6 dB</span>
-              <span>0 dB</span>
-              <span>+6 dB</span>
+            <div className="volume-slider">
+              <input
+                className="volume-slider__input"
+                type="range"
+                min={ORIGCONV_DB_MIN}
+                max={ORIGCONV_DB_MAX}
+                step={0.1}
+                value={convolvedVolDb}
+                onChange={(event) =>
+                  onChangeConvolvedVol(
+                    dbToLinearWithRange(Number(event.target.value), ORIGCONV_DB_MIN, ORIGCONV_DB_MAX),
+                  )
+                }
+                aria-valuemin={ORIGCONV_DB_MIN}
+                aria-valuemax={ORIGCONV_DB_MAX}
+                aria-valuenow={convolvedVolDb}
+                aria-valuetext={formatDb(convolvedVolDb)}
+                style={convolvedVolumeStyle}
+                disabled={convolvedDisabled}
+                title={convolvedVolumeTooltip}
+              />
+              <div className="volume-slider__labels" aria-hidden="true">
+                <span>-6 dB</span>
+                <span>0 dB</span>
+                <span>+6 dB</span>
+              </div>
+              <span className={`volume-value volume-value--${convolvedVolumeTone}`}>
+                {formatDb(convolvedVolDb)}
+              </span>
             </div>
-            <span className={`volume-value volume-value--${convolvedBVolumeTone}`}>
-              {formatDb(convolvedBVolDb)}
+          </label>
+
+          <label className="volume-control">
+            <span className="volume-label">
+              Convolved B Volume
+              <span className="volume-label__meta">RMS offset {formatDb(rmsOffsetsDb.convolvedB)}</span>
             </span>
-          </div>
-        </label>
-
-        <label className="volume-control">
-          <span className="volume-label">Difference Volume</span>
-          <div className="volume-slider">
-            <input
-              className="volume-slider__input"
-              type="range"
-              min={DIFF_DB_MIN}
-              max={DIFF_DB_MAX}
-              step={0.1}
-              value={differenceVolDb}
-            onChange={(event) =>
-              onChangeDifferenceVol(
-                dbToLinearWithRange(Number(event.target.value), DIFF_DB_MIN, DIFF_DB_MAX),
-              )
-            }
-            aria-valuemin={DIFF_DB_MIN}
-            aria-valuemax={DIFF_DB_MAX}
-            aria-valuenow={differenceVolDb}
-            aria-valuetext={formatDb(differenceVolDb)}
-            style={differenceVolumeStyle}
-            title={differenceVolumeTooltip}
-          />
-            <div className="volume-slider__labels" aria-hidden="true">
-              <span>-40 dB</span>
-              <span>0 dB</span>
-              <span>+40 dB</span>
+            <div className="volume-slider">
+              <input
+                className="volume-slider__input"
+                type="range"
+                min={CONVB_DB_MIN}
+                max={CONVB_DB_MAX}
+                step={0.1}
+                value={convolvedBVolDb}
+                onChange={(event) => {
+                  if (!onChangeConvolvedBVol) return;
+                  onChangeConvolvedBVol(
+                    dbToLinearWithRange(Number(event.target.value), CONVB_DB_MIN, CONVB_DB_MAX),
+                  );
+                }}
+                aria-valuemin={CONVB_DB_MIN}
+                aria-valuemax={CONVB_DB_MAX}
+                aria-valuenow={convolvedBVolDb}
+                aria-valuetext={formatDb(convolvedBVolDb)}
+                style={convolvedBVolumeStyle}
+                disabled={convolvedBDisabled || !onChangeConvolvedBVol}
+                title={convolvedBVolumeTooltip}
+              />
+              <div className="volume-slider__labels" aria-hidden="true">
+                <span>-6 dB</span>
+                <span>0 dB</span>
+                <span>+6 dB</span>
+              </div>
+              <span className={`volume-value volume-value--${convolvedBVolumeTone}`}>
+                {formatDb(convolvedBVolDb)}
+              </span>
             </div>
-            <span className="volume-value">{formatDb(differenceVolDb)}</span>
-          </div>
-        </label>
+          </label>
+
+          <label className="volume-control">
+            <span className="volume-label">Difference Volume</span>
+            <div className="volume-slider">
+              <input
+                className="volume-slider__input"
+                type="range"
+                min={DIFF_DB_MIN}
+                max={DIFF_DB_MAX}
+                step={0.1}
+                value={differenceVolDb}
+                onChange={(event) =>
+                  onChangeDifferenceVol(
+                    dbToLinearWithRange(Number(event.target.value), DIFF_DB_MIN, DIFF_DB_MAX),
+                  )
+                }
+                aria-valuemin={DIFF_DB_MIN}
+                aria-valuemax={DIFF_DB_MAX}
+                aria-valuenow={differenceVolDb}
+                aria-valuetext={formatDb(differenceVolDb)}
+                style={differenceVolumeStyle}
+                title={differenceVolumeTooltip}
+              />
+              <div className="volume-slider__labels" aria-hidden="true">
+                <span>-40 dB</span>
+                <span>0 dB</span>
+                <span>+40 dB</span>
+              </div>
+              <span className="volume-value">{formatDb(differenceVolDb)}</span>
+            </div>
+          </label>
+        </div>
       </div>
     </section>
   );

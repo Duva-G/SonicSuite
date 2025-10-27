@@ -26,7 +26,6 @@ import {
   sliderValueToFreq,
 } from "./ui/bandRangeUtils";
 import "./App.css";
-import harbethLogo from "./assets/harbeth-logo.svg";
 
 type ResidualBasis = {
   music: AudioBuffer;
@@ -181,6 +180,11 @@ function SonicSuiteApp() {
   const [irName, setIrName] = useState<string>("");
   const [irCName, setIrCName] = useState<string>("");
   const inlineDiffHelpPopoverId = "inline-diff-help-popover";
+  const [isHeroReady, setHeroReady] = useState(false);
+
+  useEffect(() => {
+    setHeroReady(true);
+  }, []);
 
   useEffect(() => {
     if (!musicBuffer) {
@@ -1948,12 +1952,15 @@ ${message}`);
   return (
     <div className="app">
       <div className="app-shell">
-        <header className="app-header">
-          <img src={harbethLogo} alt="Harbeth Audio" className="app-logo" />
-          <h1 className="app-title">SonicSuite Convolver</h1>
-          <p className="app-subtitle">
+        <header className="app-hero" data-ready={isHeroReady}>
+          <div className="app-hero__brand">Harbeth</div>
+          <h1 className="app-hero__title">
+            <span>SonicSuite Convolver</span>
+          </h1>
+          <p className="app-hero__subtitle">
             Harbeth SonicSuite: a powerful tool to convolve, compare, and analyse audio with precision.
           </p>
+          <div className="app-hero__divider" />
         </header>
 
         <FileInputs
@@ -2204,19 +2211,6 @@ ${message}`);
                 </div>
               ) : null}
               <div className="playback-transport">
-                <div className="playback-transport__actions">
-                  <div className="rms-match">
-                    <button
-                      type="button"
-                      className={`control-button button-ghost rms-match__button${isRmsMatched ? " is-matched" : ""}`}
-                      onClick={matchConvolvedRMS}
-                      disabled={isMatchingRms || !canMatchRms}
-                      aria-pressed={isRmsMatched}
-                    >
-                      {isMatchingRms ? "Matching..." : isRmsMatched ? "RMS Matched" : "Match RMS"}
-                    </button>
-                  </div>
-                </div>
                 <Transport
                   embedded
                   isPlaying={isPlaying}
@@ -2241,6 +2235,10 @@ ${message}`);
                   onSeek={seekTo}
                   onSkipForward={() => skipBy(10)}
                   onSkipBackward={() => skipBy(-10)}
+                  onMatchRms={matchConvolvedRMS}
+                  canMatchRms={canMatchRms}
+                  isMatchingRms={isMatchingRms}
+                  isRmsMatched={isRmsMatched}
                 />
               </div>
               {mode === "difference" && (

@@ -16,7 +16,7 @@ const LABELS: Record<Mode, string> = {
 
 export default function ModeBar({ mode, onChangeMode, disabledModes, tooltips }: Props) {
   return (
-    <div className="segmented-control" role="group" aria-label="Playback mode selector">
+    <div className="segmented-control mode-bar__segments" role="group" aria-label="Playback mode selector">
       {(Object.keys(LABELS) as Mode[]).map((key) => {
         const isActive = mode === key;
         const isDisabled = Boolean(disabledModes?.[key]);
