@@ -47,8 +47,8 @@ function formatTime(seconds: number): string {
 const ORIGCONV_DB_MIN = -6;
 const ORIGCONV_DB_MAX = 6;
 const ORIGCONV_DB_RANGE = ORIGCONV_DB_MAX - ORIGCONV_DB_MIN;
-const CONVB_DB_MIN = -24;
-const CONVB_DB_MAX = 24;
+const CONVB_DB_MIN = -6;
+const CONVB_DB_MAX = 6;
 const CONVB_DB_RANGE = CONVB_DB_MAX - CONVB_DB_MIN;
 const DIFF_DB_MIN = -40;
 const DIFF_DB_MAX = 40;
@@ -442,9 +442,9 @@ export default function Transport({
               title={convolvedBVolumeTooltip}
             />
             <div className="volume-slider__labels" aria-hidden="true">
-              <span>-24 dB</span>
+              <span>-6 dB</span>
               <span>0 dB</span>
-              <span>+24 dB</span>
+              <span>+6 dB</span>
             </div>
             <span className={`volume-value volume-value--${convolvedBVolumeTone}`}>
               {formatDb(convolvedBVolDb)}
