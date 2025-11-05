@@ -3,6 +3,7 @@ import type React from "react";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -99,6 +100,16 @@ const IOS_FALLBACK_PALETTE: ChannelColor[] = [
     fill: "rgba(255, 159, 10, 0.24)",
   },
 ];
+
+const STEREO_LEFT_COLOR: ChannelColor = {
+  stroke: "rgba(10, 132, 255, 0.95)",
+  fill: "rgba(10, 132, 255, 0.25)",
+};
+
+const STEREO_RIGHT_COLOR: ChannelColor = {
+  stroke: "rgba(255, 69, 58, 0.9)",
+  fill: "rgba(255, 69, 58, 0.22)",
+};
 
 const DEFAULT_AXIS_EXTENT = 1;
 const MIN_VISIBLE_Y_EXTENT = 1e-6;
@@ -275,6 +286,8 @@ function SingleWaveformView({
   regions,
 }: SingleWaveformProps) {
   const PlotComponent = usePlotComponent();
+  const { containerRef, containerHeight } =
+    usePlotAutoHeight(DEFAULT_LAYOUT_HEIGHT);
   const baseChannelCount = resolveChannelCount(buffer);
   const [downsampled, setDownsampled] = useState<DownsampleOutput>(() =>
     createEmptyDownsample(baseChannelCount),
@@ -555,7 +568,10 @@ function SingleWaveformView({
         : undefined;
     return {
       autosize: true,
-      height: DEFAULT_LAYOUT_HEIGHT,
+      height:
+        containerHeight > 0
+          ? Math.max(160, Math.round(containerHeight))
+          : DEFAULT_LAYOUT_HEIGHT,
       margin: { t: 24, r: 18, l: 42, b: 28 },
       paper_bgcolor: "rgba(17, 17, 21, 0.78)",
       plot_bgcolor: "rgba(11, 11, 15, 0.62)",
@@ -621,7 +637,15 @@ function SingleWaveformView({
       },
       shapes: regionShapes,
     };
-  }, [channelCount, overlays, xExtent, yExtent, regions, peak]);
+  }, [
+    channelCount,
+    overlays,
+    xExtent,
+    yExtent,
+    regions,
+    peak,
+    containerHeight,
+  ]);
 
   const config = useMemo(
     () => ({
@@ -650,13 +674,18 @@ function SingleWaveformView({
   }
 
   return (
-    <PlotComponent
-      data={data}
-      layout={layout}
-      config={config}
-      useResizeHandler
-      style={{ width: "100%", height: "100%" }}
-    />
+    <div
+      ref={containerRef}
+      style={{ width: "100%", height: "100%", minHeight: 0 }}
+    >
+      <PlotComponent
+        data={data}
+        layout={layout}
+        config={config}
+        useResizeHandler
+        style={{ width: "100%", height: "100%" }}
+      />
+    </div>
   );
 }
 
@@ -666,6 +695,8 @@ function MultiWaveformView({
   viewWindow,
 }: MultiWaveformProps) {
   const PlotComponent = usePlotComponent();
+  const { containerRef, containerHeight } =
+    usePlotAutoHeight(DEFAULT_LAYOUT_HEIGHT);
   const baseDefinitions = useMemo<BaseTraceDefinition[]>(() => {
     const entries: BaseTraceDefinition[] = [];
     (["original", "convolvedA", "convolvedB"] as TraceId[]).forEach((id) => {
@@ -1039,7 +1070,10 @@ function MultiWaveformView({
       plotData.peak > 0 ? plotData.yExtent : computeAutoYExtent(plotData.peak);
     return {
       autosize: true,
-      height: DEFAULT_LAYOUT_HEIGHT,
+      height:
+        containerHeight > 0
+          ? Math.max(220, Math.round(containerHeight))
+          : DEFAULT_LAYOUT_HEIGHT,
       margin: { t: 32, r: 18, l: 42, b: 28 },
       paper_bgcolor: "rgba(17, 17, 21, 0.78)",
       plot_bgcolor: "rgba(11, 11, 15, 0.62)",
@@ -1104,7 +1138,7 @@ function MultiWaveformView({
         mirror: true,
       },
     };
-  }, [plotData, resolvedRange.end, resolvedRange.start]);
+  }, [plotData, resolvedRange.end, resolvedRange.start, containerHeight]);
 
   const config = useMemo(
     () => ({
@@ -1157,13 +1191,18 @@ function MultiWaveformView({
   );
 
   const plotContent = PlotComponent ? (
-    <PlotComponent
-      data={plotData.traces}
-      layout={layout}
-      config={config}
-      useResizeHandler
-      style={{ width: "100%", height: "100%" }}
-    />
+    <div
+      ref={containerRef}
+      style={{ width: "100%", height: "100%", minHeight: 0 }}
+    >
+      <PlotComponent
+        data={plotData.traces}
+        layout={layout}
+        config={config}
+        useResizeHandler
+        style={{ width: "100%", height: "100%" }}
+      />
+    </div>
   ) : (
     <div className="plot-skeleton" role="status" aria-live="polite">
       Loading waveform...
@@ -1229,6 +1268,70 @@ function MultiWaveformView({
       {plotContent}
     </>
   );
+}
+
+function usePlotAutoHeight(fallbackHeight: number) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [containerHeight, setContainerHeight] =
+    useState<number>(fallbackHeight);
+
+  useLayoutEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const node = containerRef.current;
+    if (!node) {
+      return;
+    }
+
+    const commitHeight = (value: number) => {
+      const next = value > 0 ? value : fallbackHeight;
+      setContainerHeight((prev) =>
+        Math.abs(prev - next) > 0.5 ? next : prev,
+      );
+    };
+
+    const target = node.parentElement ?? node;
+
+    if (typeof ResizeObserver === "undefined") {
+      const rect = target.getBoundingClientRect();
+      if (Number.isFinite(rect.height) && rect.height > 0) {
+        commitHeight(rect.height);
+      } else {
+        commitHeight(fallbackHeight);
+      }
+      return;
+    }
+
+    let animationFrameId = 0;
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const measured = entry.contentRect.height;
+      if (!Number.isFinite(measured) || measured <= 0) {
+        return;
+      }
+      commitHeight(measured);
+    });
+    observer.observe(target);
+
+    animationFrameId = window.requestAnimationFrame(() => {
+      const rect = target.getBoundingClientRect();
+      if (Number.isFinite(rect.height) && rect.height > 0) {
+        commitHeight(rect.height);
+      }
+    });
+
+    return () => {
+      observer.disconnect();
+      if (animationFrameId) {
+        window.cancelAnimationFrame(animationFrameId);
+      }
+    };
+  }, [fallbackHeight]);
+
+  return { containerRef, containerHeight };
 }
 
 function createEmptyDownsample(channelCount = 0): DownsampleOutput {
@@ -1408,17 +1511,14 @@ function deriveIosChannelPalette(
   count: number,
 ): ChannelColor[] {
   if (count <= 0) {
-    return [IOS_FALLBACK_PALETTE[0]];
+    return applyStereoOverrides([IOS_FALLBACK_PALETTE[0]], count);
   }
-  const palette: ChannelColor[] = [];
+  let palette: ChannelColor[] = [];
   const parsed = parseColorToRgb(baseColor);
   if (parsed) {
     const primaryStroke = rgbaString(parsed, count > 1 ? 0.96 : 0.98);
     const primaryFill = rgbaString(parsed, 0.28);
-    palette.push({ stroke: primaryStroke, fill: primaryFill });
-    if (count === 1) {
-      return palette;
-    }
+    palette = [{ stroke: primaryStroke, fill: primaryFill }];
     for (let i = 1; i < count; i++) {
       const shiftedHue = shiftHue(parsed, i * 12);
       const adjusted = adjustLightness(
@@ -1429,12 +1529,36 @@ function deriveIosChannelPalette(
       const fill = rgbaString(adjusted, 0.22);
       palette.push({ stroke, fill });
     }
+  } else {
+    palette = [];
+    for (let i = 0; i < count; i++) {
+      palette.push(IOS_FALLBACK_PALETTE[i % IOS_FALLBACK_PALETTE.length]);
+    }
+  }
+  return applyStereoOverrides(palette, count);
+}
+
+function applyStereoOverrides(
+  palette: ChannelColor[],
+  count: number,
+): ChannelColor[] {
+  if (count <= 0) {
     return palette;
   }
-  for (let i = 0; i < count; i++) {
-    palette.push(IOS_FALLBACK_PALETTE[i % IOS_FALLBACK_PALETTE.length]);
+  const next = palette.slice(0, count);
+  if (next.length < count) {
+    for (let i = next.length; i < count; i++) {
+      next.push(IOS_FALLBACK_PALETTE[i % IOS_FALLBACK_PALETTE.length]);
+    }
   }
-  return palette;
+  if (count >= 2) {
+    next[0] = STEREO_LEFT_COLOR;
+    next[1] = STEREO_RIGHT_COLOR;
+  }
+  if (count === 1 && !next[0]) {
+    next[0] = STEREO_LEFT_COLOR;
+  }
+  return next;
 }
 
 function parseColorToRgb(color: string): RGB | null {
