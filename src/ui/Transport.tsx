@@ -100,7 +100,7 @@ function formatLinearGain(db: number): string {
 function buildVolumeTooltip(label: string, sliderDb: number, offsetDb: number, extra?: string) {
   const parts = [
     `${label}: ${formatDb(sliderDb)} (${formatLinearGain(sliderDb)})`,
-    `RMS offset ${formatDb(offsetDb)} (${formatLinearGain(offsetDb)})`,
+    `Loudness offset (LU) ${formatDb(offsetDb)} (${formatLinearGain(offsetDb)})`,
   ];
   if (extra) {
     parts.push(extra);
@@ -156,7 +156,7 @@ export default function Transport({
   const isReady = duration > 0;
   const displayPosition = isScrubbing ? pendingPosition : position;
 
-  const rmsLabel = isMatchingRms ? "Matching..." : isRmsMatched ? "RMS Matched" : "Match RMS";
+  const rmsLabel = isMatchingRms ? "Matching..." : isRmsMatched ? "Loudness matched" : "Volume match";
   const rmsDisabled = isMatchingRms || !canMatchRms;
   const [areVolumesOpen, setVolumesOpen] = useState(true);
 
@@ -380,7 +380,7 @@ export default function Transport({
           <label className="volume-control">
             <span className="volume-label">
               Original Volume
-              <span className="volume-label__meta">RMS offset {formatDb(rmsOffsetsDb.original)}</span>
+              <span className="volume-label__meta">Loudness offset (LU) {formatDb(rmsOffsetsDb.original)}</span>
             </span>
             <div className="volume-slider">
               <input
@@ -416,7 +416,7 @@ export default function Transport({
           <label className="volume-control">
             <span className="volume-label">
               Convolved A Volume
-              <span className="volume-label__meta">RMS offset {formatDb(rmsOffsetsDb.convolvedA)}</span>
+              <span className="volume-label__meta">Loudness offset (LU) {formatDb(rmsOffsetsDb.convolvedA)}</span>
             </span>
             <div className="volume-slider">
               <input
@@ -453,7 +453,7 @@ export default function Transport({
           <label className="volume-control">
             <span className="volume-label">
               Convolved B Volume
-              <span className="volume-label__meta">RMS offset {formatDb(rmsOffsetsDb.convolvedB)}</span>
+              <span className="volume-label__meta">Loudness offset (LU) {formatDb(rmsOffsetsDb.convolvedB)}</span>
             </span>
             <div className="volume-slider">
               <input
