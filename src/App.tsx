@@ -1833,6 +1833,7 @@ ${message}`);
       return {
         matchGain: clamped,
         latencySeconds: offset / targetRate,
+        dryLufs,
       };
     };
 
