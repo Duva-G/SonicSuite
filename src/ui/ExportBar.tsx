@@ -11,7 +11,7 @@ export default function ExportBar({ renderAndExport, downloadUrl, renderDifferen
       <div className="panel-header">
         <div>
           <h2 className="panel-title">Render & export</h2>
-          <p className="panel-desc">Bounce an RMS-matched WAV ready for delivery or archiving.</p>
+          <p className="panel-desc">Bounce an LUFS-matched WAV ready for delivery or archiving.</p>
         </div>
         <div className="export-panel__downloads">
           {downloadUrl && (
