@@ -144,7 +144,9 @@ export default function FRPlayback({ musicBuffer, irBuffer: irBufferA, irBufferB
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const { worker, error } = createModuleWorker(new URL("../workers/dspWorker.ts", import.meta.url));
+    const { worker, error } = createModuleWorker(() =>
+      new Worker(new URL("../workers/dspWorker.ts", import.meta.url), { type: "module" }),
+    );
     if (!worker) {
       if (error) {
         console.warn("Playback FR worker unavailable.", error);
