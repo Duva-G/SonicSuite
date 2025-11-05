@@ -4202,14 +4202,16 @@
 }
 
 .fullscreen-modal__plot {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   display: flex;
   width: 100%;
   height: 100%;
   margin: 0;
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: stretch;
   position: relative;
+  min-height: 0;
+  min-width: 0;
 }
 
 .fullscreen-modal__plot > * {
