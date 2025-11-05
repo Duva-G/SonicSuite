@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import FileInputs from "./ui/FileInputs";
 import Transport from "./ui/Transport";
 import ModeBar from "./ui/ModeBar";
@@ -10,9 +10,11 @@ import IRProcessingPanel from "./ui/IRProcessingPanel";
 import PasswordGate from "./ui/PasswordGate";
 import { createModuleWorker } from "./utils/workerSupport";
 import BandAuditionRouter, { type AuditionPath, type BasePath } from "./audio/BandAuditionRouter";
+import { computeAlignedLufsPair, computeIntegratedLufs } from "./audio/lufs";
 import type { BandSettings } from "./audio/bandPassFactory";
 import type { LatencySecondsMap } from "./audio/LatencyCompensator";
 import { computeBandTrims, type TrimResult } from "./audio/BandLevelMatcher";
+import { computeBandLoudnessGains, type BandLoudnessResult } from "./audio/bandLoudness";
 import BlindTestPanel from "./ui/BlindTestPanel";
 import FullscreenModal from "./ui/FullscreenModal";
 import RoundBlindTestPanel from "./ui/BlindTest/BlindTestPanel";
@@ -26,6 +28,15 @@ import {
   sliderValueToFreq,
 } from "./ui/bandRangeUtils";
 import "./App.css";
+
+const TARGET_PLAYBACK_LUFS = -24;
+
+function gainForTargetLufs(lufs: number, target = TARGET_PLAYBACK_LUFS): number {
+  if (!Number.isFinite(lufs)) return 1;
+  const gain = 10 ** ((target - lufs) / 20);
+  if (!Number.isFinite(gain) || gain <= 0) return 1;
+  return Math.min(10, Math.max(0.01, gain));
+}
 
 type ResidualBasis = {
   music: AudioBuffer;
@@ -219,7 +230,26 @@ function SonicSuiteApp() {
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [isInlineDiffHelpOpen]);
-  const [bandTrimResult, setBandTrimResult] = useState<TrimResult | null>(null);
+const [bandTrimResult, setBandTrimResult] = useState<TrimResult | null>(null);
+const [playbackNormGains, setPlaybackNormGains] = useState<{
+  original: number;
+  convolvedA: number;
+  convolvedB: number;
+}>({ original: 1, convolvedA: 1, convolvedB: 1 });
+const [bandLoudnessResult, setBandLoudnessResult] = useState<BandLoudnessResult | null>(null);
+
+  const updatePlaybackBase = useCallback((baseGain: number) => {
+    setPlaybackNormGains((prev) => {
+      if (
+        Math.abs(prev.original - baseGain) < 1e-6 &&
+        Math.abs(prev.convolvedA - baseGain) < 1e-6 &&
+        Math.abs(prev.convolvedB - baseGain) < 1e-6
+      ) {
+        return prev;
+      }
+      return { original: baseGain, convolvedA: baseGain, convolvedB: baseGain };
+    });
+  }, []);
 
   const getModeDuration = useCallback((playbackMode: Mode = mode): number => {
     const musicDuration = musicBufRef.current?.duration ?? 0;
@@ -326,9 +356,9 @@ function SonicSuiteApp() {
 
   const differenceOptions = useMemo(
     () => [
-      { value: "origMinusA" as DifferenceMode, label: "Original − A", shortcut: "5", disabled: !canOrigMinusA },
-      { value: "origMinusB" as DifferenceMode, label: "Original − B", shortcut: "6", disabled: !canOrigMinusB },
-      { value: "aMinusB" as DifferenceMode, label: "A − B", shortcut: "7", disabled: !canAMinusB },
+      { value: "origMinusA" as DifferenceMode, label: "Original - A", shortcut: "5", disabled: !canOrigMinusA },
+      { value: "origMinusB" as DifferenceMode, label: "Original - B", shortcut: "6", disabled: !canOrigMinusB },
+      { value: "aMinusB" as DifferenceMode, label: "A - B", shortcut: "7", disabled: !canAMinusB },
     ],
     [canOrigMinusA, canOrigMinusB, canAMinusB],
   );
@@ -444,6 +474,9 @@ function SonicSuiteApp() {
       setConvolvedGainMatched(false);
       startOffsetRef.current = 0;
       setPlaybackPosition(0);
+      const musicLufs = computeIntegratedLufs(buf, 0, buf.length);
+      const baseOriginalGain = gainForTargetLufs(musicLufs);
+      updatePlaybackBase(baseOriginalGain);
       setStatus(`Music loaded: ${f.name} - ${buf.sampleRate} Hz - ${buf.duration.toFixed(2)} s`);
     } catch (err) {
       musicBufRef.current = null;
@@ -472,7 +505,7 @@ function SonicSuiteApp() {
         convolverLatency: convolverLatencyRef,
         rmsKey: "convolvedA" as const,
         modeKey: "convolvedA" as const,
-        playbackVolume: convolvedVol,
+        playbackVolume: convolvedVol * playbackNormGains.convolvedA,
         label: IR_SLOT_LABEL.B,
         shouldResetResiduals: true,
         resetOriginalRms: true,
@@ -490,7 +523,7 @@ function SonicSuiteApp() {
       convolverLatency: convolverLatencyCRef,
       rmsKey: "convolvedB" as const,
       modeKey: "convolvedB" as const,
-      playbackVolume: bandCVol,
+      playbackVolume: bandCVol * playbackNormGains.convolvedB,
       label: IR_SLOT_LABEL.C,
       shouldResetResiduals: false,
       resetOriginalRms: true,
@@ -521,7 +554,7 @@ function SonicSuiteApp() {
         residualBasisRef.current = null;
         residualBufRef.current = null;
         if (mode === "convolvedA" && gainRef.current) {
-          gainRef.current.gain.value = convolvedVol;
+          gainRef.current.gain.value = convolvedVol * playbackNormGains.convolvedA;
         }
       }
 
@@ -657,8 +690,12 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
       router.connectBase("A", dryTap);
 
       const latencies: LatencySecondsMap = { A: 0 };
+      const baseOriginalGain = playbackNormGains.original;
+      const baseConvolvedAGain = playbackNormGains.convolvedA;
+      const baseConvolvedBGain = playbackNormGains.convolvedB;
+
       const trims: Partial<Record<BasePath, number>> = {
-        A: Math.max(originalVol, 1e-6),
+        A: Math.max(originalVol * baseOriginalGain, 1e-6),
       };
 
       const irB = irBufRef.current;
@@ -670,7 +707,7 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
         src.connect(convB).connect(matchGainB);
         router.connectBase("B", matchGainB);
         latencies.B = Math.max(0, convolverLatencyRef.current);
-        trims.B = Math.max(convolvedVol, 1e-6);
+        trims.B = Math.max(convolvedVol * baseConvolvedAGain, 1e-6);
       } else {
         convRef.current = null;
         matchGainRef.current = null;
@@ -685,10 +722,19 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
         src.connect(convC).connect(matchGainC);
         router.connectBase("C", matchGainC);
         latencies.C = Math.max(0, convolverLatencyCRef.current);
-        trims.C = Math.max(bandCVol, 1e-6);
+        trims.C = Math.max(bandCVol * baseConvolvedBGain, 1e-6);
       } else {
         convCRef.current = null;
         matchGainCRef.current = null;
+      }
+
+      if (bandLoudnessResult) {
+        if (trims.B && bandLoudnessResult.gains.B) {
+          trims.B *= bandLoudnessResult.gains.B;
+        }
+        if (trims.C && bandLoudnessResult.gains.C) {
+          trims.C *= bandLoudnessResult.gains.C;
+        }
       }
 
       if (bandTrimResult && bandMatchRmsEnabled) {
@@ -807,10 +853,10 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
     const initialGain = isDifference
       ? differenceVol
       : isConvolvedA
-      ? convolvedVol
+      ? convolvedVol * playbackNormGains.convolvedA
       : isConvolvedB
-      ? bandCVol
-      : originalVol;
+      ? bandCVol * playbackNormGains.convolvedB
+      : originalVol * playbackNormGains.original;
     const volume = new GainNode(ctx, { gain: initialGain });
     srcRef.current = src;
     gainRef.current = volume;
@@ -896,6 +942,7 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
     bandMatchRmsEnabled,
     bandScopeEngaged,
     bandTrimResult,
+    bandLoudnessResult,
     convolvedCMatchGain,
     convolvedMatchGain,
     convolvedVol,
@@ -905,6 +952,7 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
     hasIrB,
     hasIrC,
     isFullRangeBand,
+    playbackNormGains,
     latencySamples,
     mode,
     originalVol,
@@ -1307,6 +1355,55 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
   ]);
 
   useEffect(() => {
+    const music = musicBufRef.current;
+    if (!bandScopeEngaged || !music) {
+      setBandLoudnessResult(null);
+      return;
+    }
+    const irB = irBufRef.current;
+    const irC = irCBufRef.current;
+    let cancelled = false;
+    const bandSettings: BandSettings = {
+      enabled: isBandActive,
+      minHz: playbackBandMinHz,
+      maxHz: playbackBandMaxHz,
+    };
+    computeBandLoudnessGains({
+      dry: music,
+      irB: irB ?? undefined,
+      irC: irC ?? undefined,
+      band: bandSettings,
+      wetBGain: convolvedMatchGain * playbackNormGains.convolvedA,
+      wetCGain: convolvedCMatchGain * playbackNormGains.convolvedB,
+    })
+      .then((result) => {
+        if (!cancelled) {
+          setBandLoudnessResult(result);
+        }
+      })
+      .catch((err) => {
+        console.warn("Band loudness computation failed", err);
+        if (!cancelled) {
+          setBandLoudnessResult(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    bandScopeEngaged,
+    isBandActive,
+    playbackBandMinHz,
+    playbackBandMaxHz,
+    musicBuffer,
+    irBuffer,
+    irCBuffer,
+    convolvedMatchGain,
+    convolvedCMatchGain,
+    playbackNormGains,
+  ]);
+
+  useEffect(() => {
     if (!irCBuffer) {
       setBandCVol(1);
     }
@@ -1316,10 +1413,18 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
     if (!auditionRouterRef.current) return;
     if (!bandScopeEngaged) return;
     const trims: Partial<Record<BasePath, number>> = {
-      A: Math.max(originalVol, 1e-6),
-      B: hasIrB ? Math.max(convolvedVol, 1e-6) : undefined,
-      C: hasIrC ? Math.max(bandCVol, 1e-6) : undefined,
+      A: Math.max(originalVol * playbackNormGains.original, 1e-6),
+      B: hasIrB ? Math.max(convolvedVol * playbackNormGains.convolvedA, 1e-6) : undefined,
+      C: hasIrC ? Math.max(bandCVol * playbackNormGains.convolvedB, 1e-6) : undefined,
     };
+    if (bandLoudnessResult) {
+      if (trims.B && bandLoudnessResult.gains.B) {
+        trims.B *= bandLoudnessResult.gains.B;
+      }
+      if (trims.C && bandLoudnessResult.gains.C) {
+        trims.C *= bandLoudnessResult.gains.C;
+      }
+    }
     if (bandMatchRmsEnabled && bandTrimResult) {
       if (trims.B && bandTrimResult.trims.B) {
         trims.B *= bandTrimResult.trims.B;
@@ -1333,6 +1438,8 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
     bandScopeEngaged,
     bandMatchRmsEnabled,
     bandTrimResult,
+    bandLoudnessResult,
+    playbackNormGains,
     originalVol,
     convolvedVol,
     bandCVol,
@@ -1437,7 +1544,9 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
   }, [getModeDuration, isPlaying, mode, playbackBandMinHz, playbackBandMaxHz, teardownGraph]);
 
   useEffect(() => {
-    const { worker, error } = createModuleWorker(new URL("./workers/residualWorker.ts", import.meta.url));
+    const { worker, error } = createModuleWorker(() =>
+      new Worker(new URL("./workers/residualWorker.ts", import.meta.url), { type: "module" }),
+    );
     if (!worker) {
       if (error) {
         console.warn("Residual worker unavailable; falling back to main-thread processing.", error);
@@ -1514,21 +1623,21 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
   function onChangeOriginalVol(v: number) {
     setOriginalVol(v);
     if (gainRef.current && mode === "original") {
-      gainRef.current.gain.value = v;
+      gainRef.current.gain.value = v * playbackNormGains.original;
     }
   }
 
   function onChangeConvolvedVol(v: number) {
     setConvolvedVol(v);
     if (gainRef.current && mode === "convolvedA") {
-      gainRef.current.gain.value = v;
+      gainRef.current.gain.value = v * playbackNormGains.convolvedA;
     }
   }
 
   function onChangeConvolvedBVol(v: number) {
     setBandCVol(v);
     if (gainRef.current && mode === "convolvedB") {
-      gainRef.current.gain.value = v;
+      gainRef.current.gain.value = v * playbackNormGains.convolvedB;
     }
   }
 
@@ -1692,7 +1801,7 @@ ${message}`);
     return clone;
   }
 
-  async function matchConvolvedRMS() {
+  async function matchConvolvedLoudness() {
     const music = musicBufRef.current;
     const irB = irBufRef.current;
     const irC = irCBufRef.current;
@@ -1715,8 +1824,10 @@ ${message}`);
       const rendered = await offline.startRendering();
 
       const offset = computeAnalysisOffset(wetIr, rendered.length);
-      const [dryRms, wetRms] = alignedRmsPair(dryBuffer, rendered, offset);
-      let ratio = wetRms > 0 ? dryRms / wetRms : 1;
+      const [dryLufs, wetLufs] = computeAlignedLufsPair(dryBuffer, rendered, offset);
+      let luDelta = Number.isFinite(dryLufs) && Number.isFinite(wetLufs) ? dryLufs - wetLufs : 0;
+      if (!Number.isFinite(luDelta)) luDelta = 0;
+      let ratio = 10 ** (luDelta / 20);
       if (!Number.isFinite(ratio) || ratio <= 0) ratio = 1;
       const clamped = Math.min(4, Math.max(0.1, ratio));
       return {
@@ -1738,24 +1849,29 @@ ${message}`);
         setConvolvedMatchGain(metrics.matchGain);
         setConvolvedGainMatched(true);
         convolverLatencyRef.current = metrics.latencySeconds;
+        const normalizedBase = gainForTargetLufs(metrics.dryLufs);
+        updatePlaybackBase(normalizedBase);
         if (matchGainRef.current) {
           matchGainRef.current.gain.value = metrics.matchGain;
         }
         if (mode === "convolvedA" && gainRef.current) {
-          gainRef.current.gain.value = convolvedVol;
+          gainRef.current.gain.value = convolvedVol * normalizedBase;
         }
         if (mode === "original" && gainRef.current) {
-          gainRef.current.gain.value = originalVol;
+          gainRef.current.gain.value = originalVol * normalizedBase;
         }
+        const baseConvolvedAGain = normalizedBase;
         const bandTrimBValue =
           bandMatchRmsEnabled && bandTrimResult?.trims.B ? bandTrimResult.trims.B : 1;
-        const trimB = Math.max(convolvedVol, 1e-6) * bandTrimBValue;
+        const bandLoudnessB = bandLoudnessResult?.gains.B ?? 1;
+        const trimB =
+          Math.max(convolvedVol * baseConvolvedAGain, 1e-6) * bandTrimBValue * bandLoudnessB;
         auditionRouterRef.current?.updateTrims({ B: trimB });
         broadcastRouterLatencies();
         const offsetDbRaw = 20 * Math.log10(metrics.matchGain);
         const offsetDb = Number.isFinite(offsetDbRaw) ? offsetDbRaw : 0;
         offsetsUpdate.convolvedA = offsetDb;
-        statusLines.push(`Convolved A RMS gain set to ${metrics.matchGain.toFixed(2)}x (${offsetDb.toFixed(2)} dB).`);
+        statusLines.push(`Convolved A loudness gain set to ${metrics.matchGain.toFixed(2)}x (${offsetDb.toFixed(2)} dB).`);
       }
 
       if (irC) {
@@ -1763,21 +1879,35 @@ ${message}`);
         setConvolvedCMatchGain(metrics.matchGain);
         setConvolvedBGainMatched(true);
         convolverLatencyCRef.current = metrics.latencySeconds;
+        const normalizedBase = gainForTargetLufs(metrics.dryLufs);
+        updatePlaybackBase(normalizedBase);
         if (matchGainCRef.current) {
           matchGainCRef.current.gain.value = metrics.matchGain;
         }
         if (mode === "convolvedB" && gainRef.current) {
-          gainRef.current.gain.value = bandCVol;
+          gainRef.current.gain.value = bandCVol * normalizedBase;
         }
+        if (mode === "convolvedA" && gainRef.current) {
+          gainRef.current.gain.value = convolvedVol * normalizedBase;
+        }
+        if (mode === "original" && gainRef.current) {
+          gainRef.current.gain.value = originalVol * normalizedBase;
+        }
+        if (mode === "convolvedB" && gainRef.current) {
+          gainRef.current.gain.value = bandCVol * normalizedBase;
+        }
+        const baseConvolvedBGain = normalizedBase;
         const bandTrimCValue =
           bandMatchRmsEnabled && bandTrimResult?.trims.C ? bandTrimResult.trims.C : 1;
-        const trimC = Math.max(bandCVol, 1e-6) * bandTrimCValue;
+        const bandLoudnessC = bandLoudnessResult?.gains.C ?? 1;
+        const trimC =
+          Math.max(bandCVol * baseConvolvedBGain, 1e-6) * bandTrimCValue * bandLoudnessC;
         auditionRouterRef.current?.updateTrims({ C: trimC });
         broadcastRouterLatencies();
         const offsetDbRaw = 20 * Math.log10(metrics.matchGain);
         const offsetDb = Number.isFinite(offsetDbRaw) ? offsetDbRaw : 0;
         offsetsUpdate.convolvedB = offsetDb;
-        statusLines.push(`Convolved B RMS gain set to ${metrics.matchGain.toFixed(2)}x (${offsetDb.toFixed(2)} dB).`);
+        statusLines.push(`Convolved B loudness gain set to ${metrics.matchGain.toFixed(2)}x (${offsetDb.toFixed(2)} dB).`);
       }
 
       if (statusLines.length > 0) {
@@ -1791,7 +1921,7 @@ ${message}`);
         }));
       }
     } catch (err) {
-      setStatus(`RMS match failed: ${(err as Error).message}`);
+      setStatus(`Loudness match failed: ${(err as Error).message}`);
     } finally {
       setMatchingRms(false);
     }
@@ -1821,9 +1951,15 @@ ${message}`);
 
     const irForAnalysis = resampleAudioBuffer(ir, sr);
     const analysisOffset = computeAnalysisOffset(irForAnalysis, rendered.length);
-    const [rOrig, rConv] = alignedRmsPair(music, rendered, analysisOffset);
-    const ratio = rConv > 0 ? rOrig / rConv : 1.0;
-    if (ratio !== 1) scaleInPlace(rendered, Math.min(4, Math.max(0.1, ratio)));
+    const [origLufs, convLufs] = computeAlignedLufsPair(music, rendered, analysisOffset);
+    let luDelta = Number.isFinite(origLufs) && Number.isFinite(convLufs) ? origLufs - convLufs : 0;
+    if (!Number.isFinite(luDelta)) luDelta = 0;
+    let loudnessGain = 10 ** (luDelta / 20);
+    if (!Number.isFinite(loudnessGain) || loudnessGain <= 0) loudnessGain = 1;
+    const clamped = Math.min(4, Math.max(0.1, loudnessGain));
+    const baseExportGain = gainForTargetLufs(origLufs);
+    const totalGain = Math.min(4, Math.max(0.1, clamped * baseExportGain));
+    if (totalGain !== 1) scaleInPlace(rendered, totalGain);
 
     const wav = audioBufferToWav(rendered, 16);
     const blob = new Blob([wav], { type: "audio/wav" });
@@ -2235,7 +2371,7 @@ ${message}`);
                   onSeek={seekTo}
                   onSkipForward={() => skipBy(10)}
                   onSkipBackward={() => skipBy(-10)}
-                  onMatchRms={matchConvolvedRMS}
+                  onMatchRms={matchConvolvedLoudness}
                   canMatchRms={canMatchRms}
                   isMatchingRms={isMatchingRms}
                   isRmsMatched={isRmsMatched}
@@ -2368,7 +2504,7 @@ ${message}`);
         ) : null}
 
         <p className="footnote">
-          Notes: Playback uses Web Audio. Rendering uses OfflineAudioContext. RMS matched before export.
+          Notes: Playback uses Web Audio. Rendering uses OfflineAudioContext. Volume matched before export.
         </p>
 
         <FullscreenModal
@@ -2604,38 +2740,6 @@ function resampleAudioBuffer(buffer: AudioBuffer, targetRate: number): AudioBuff
     }
   }
   return resampled;
-}
-
-function rmsBuffer(buf: AudioBuffer, frameCount?: number, offset = 0): number {
-  const start = Math.max(0, Math.min(offset, buf.length));
-  const available = buf.length - start;
-  const frames = Math.min(frameCount ?? available, available);
-  if (frames <= 0) return 0;
-  const channels = buf.numberOfChannels;
-  if (channels === 0) return 0;
-  let acc = 0;
-  for (let ch = 0; ch < channels; ch++) {
-    const data = buf.getChannelData(ch);
-    for (let i = 0; i < frames; i++) {
-      const x = data[start + i];
-      acc += x * x;
-    }
-  }
-  const count = frames * channels;
-  return count ? Math.sqrt(acc / count) : 0;
-}
-
-function alignedRmsPair(dry: AudioBuffer, wet: AudioBuffer, offset: number): [number, number] {
-  if (dry.length === 0 || wet.length === 0) return [0, 0];
-  const wetAvailable = Math.max(0, wet.length - offset);
-  let frames = Math.min(dry.length, wetAvailable);
-  if (frames <= 0) frames = Math.min(dry.length, wet.length);
-  if (frames <= 0) return [0, 0];
-  const wetOffset = Math.max(0, Math.min(offset, wet.length - frames));
-  const dryOffset = 0;
-  const dryRms = rmsBuffer(dry, frames, dryOffset);
-  const wetRms = rmsBuffer(wet, frames, wetOffset);
-  return [dryRms, wetRms];
 }
 
 function scaleInPlace(buf: AudioBuffer, g: number) {
