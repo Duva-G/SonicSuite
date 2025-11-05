@@ -274,7 +274,9 @@ export default function FRMusicPink({ musicBuffer, sampleRate }: Props) {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const { worker, error: workerError } = createModuleWorker(new URL("../workers/dspWorker.ts", import.meta.url));
+    const { worker, error: workerError } = createModuleWorker(() =>
+      new Worker(new URL("../workers/dspWorker.ts", import.meta.url), { type: "module" }),
+    );
     if (!worker) {
       if (workerError) {
         console.warn("FRMusicPink worker unavailable.", workerError);
