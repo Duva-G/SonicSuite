@@ -3,7 +3,9 @@ export type WorkerInitResult = {
   error: Error | null;
 };
 
-export function createModuleWorker(scriptUrl: string | URL, options?: WorkerOptions): WorkerInitResult {
+type WorkerFactory = () => Worker;
+
+export function createModuleWorker(factory: WorkerFactory): WorkerInitResult {
   if (typeof Worker === "undefined") {
     return {
       worker: null,
@@ -12,7 +14,7 @@ export function createModuleWorker(scriptUrl: string | URL, options?: WorkerOpti
   }
 
   try {
-    const worker = new Worker(scriptUrl, { ...options, type: options?.type ?? "module" });
+    const worker = factory();
     return { worker, error: null };
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
