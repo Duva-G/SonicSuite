@@ -124,7 +124,9 @@ export default function FRPink({ irBuffer, sampleRate, label }: Props) {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const { worker, error } = createModuleWorker(new URL("../workers/dspWorker.ts", import.meta.url));
+    const { worker, error } = createModuleWorker(() =>
+      new Worker(new URL("../workers/dspWorker.ts", import.meta.url), { type: "module" }),
+    );
     if (!worker) {
       if (error) {
         console.warn("Pink-noise analysis worker unavailable.", error);
