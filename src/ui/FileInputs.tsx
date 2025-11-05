@@ -401,7 +401,12 @@ export default function FileInputs({
           </div>
         )}
       </div>
-      <FullscreenModal isOpen={showMusicFull} onClose={() => setShowMusicFull(false)} title={musicName || "Music"}>
+      <FullscreenModal
+        isOpen={showMusicFull}
+        onClose={() => setShowMusicFull(false)}
+        title={musicName || "Music"}
+        bodyClassName="fullscreen-modal__body--stretch"
+      >
         {musicBuffer && (
           <div className="fullscreen-modal__plot">
             <WaveformPlot buffer={musicBuffer} color="#5ac8fa" title={musicName || "Music"} />
@@ -412,6 +417,7 @@ export default function FileInputs({
         isOpen={showMusicPinkModal}
         onClose={() => setShowMusicPinkModal(false)}
         title={musicName ? `${musicName} - Spectrum vs Pink` : "Spectrum vs Pink"}
+        bodyClassName="fullscreen-modal__body--stretch"
       >
         {musicBuffer && (
           <div className="fullscreen-modal__plot">
@@ -423,6 +429,7 @@ export default function FileInputs({
         isOpen={showIrFull}
         onClose={() => setShowIrFull(false)}
         title={irName || "Impulse response"}
+        bodyClassName="fullscreen-modal__body--stretch"
       >
         {irBuffer && (
           <div className="fullscreen-modal__plot">
@@ -434,6 +441,7 @@ export default function FileInputs({
         isOpen={showIrCFull}
         onClose={() => setShowIrCFull(false)}
         title={irCName || "Impulse response B"}
+        bodyClassName="fullscreen-modal__body--stretch"
       >
         {irCBuffer && (
           <div className="fullscreen-modal__plot">
