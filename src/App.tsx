@@ -15,6 +15,7 @@ import type { BandSettings } from "./audio/bandPassFactory";
 import type { LatencySecondsMap } from "./audio/LatencyCompensator";
 import { computeBandTrims, type TrimResult } from "./audio/BandLevelMatcher";
 import { computeBandLoudnessGains, type BandLoudnessResult } from "./audio/bandLoudness";
+import { createBandpassChain, type BandpassChain } from "./audio/bandPassFactory";
 import BlindTestPanel from "./ui/BlindTestPanel";
 import FullscreenModal from "./ui/FullscreenModal";
 import RoundBlindTestPanel from "./ui/BlindTest/BlindTestPanel";
@@ -38,13 +39,27 @@ function gainForTargetLufs(lufs: number, target = TARGET_PLAYBACK_LUFS): number 
   return Math.min(10, Math.max(0.01, gain));
 }
 
-type ResidualBasis = {
+type PreparedResidualBasis = {
   music: AudioBuffer;
   ir: AudioBuffer;
   convolved: AudioBuffer;
   offset: number;
   gains: number[];
   fallbackResidual: AudioBuffer;
+};
+
+type ResidualBasis = {
+  path: DifferenceMode;
+  music: AudioBuffer;
+  ir: AudioBuffer | null;
+  convolved: AudioBuffer;
+  offset: number;
+  gains: number[];
+  fallbackResidual: AudioBuffer;
+  sourceMusic: AudioBuffer;
+  sourceIrB?: AudioBuffer | null;
+  sourceIrC?: AudioBuffer | null;
+  latencySamples: number;
 };
 
 type PathMetric = {
@@ -121,6 +136,8 @@ function SonicSuiteApp() {
   const bandPathRef = useRef<AuditionPath>("A");
   const bandPathOverrideRef = useRef<AuditionPath | null>(null);
   const previousPlaybackBandRef = useRef<[number, number]>([...FULL_PLAYBACK_BAND]);
+  const residualBandRef = useRef<BandpassChain | null>(null);
+  const differenceGainSignRef = useRef(1);
 
   const musicBufRef = useRef<AudioBuffer | null>(null);
   const irOriginalRef = useRef<AudioBuffer | null>(null);
@@ -620,6 +637,10 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
     convCRef.current?.disconnect();
     matchGainCRef.current?.disconnect();
     gainRef.current?.disconnect();
+    residualBandRef.current?.input.disconnect();
+    if (residualBandRef.current?.output instanceof AudioNode) {
+      residualBandRef.current.output.disconnect();
+    }
     auditionRouterRef.current?.dispose();
     srcRef.current = null;
     convRef.current = null;
@@ -628,13 +649,17 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
     matchGainCRef.current = null;
     gainRef.current = null;
     auditionRouterRef.current = null;
+    residualBandRef.current = null;
   }, []);
 
   const makeGraph = useCallback((at: number, playbackMode: Mode = mode) => {
     const ctx = ensureCtx();
     const usingBandScope = bandScopeEngaged;
     const isDifferenceMode = playbackMode === "difference";
-    const shouldUseRouter = usingBandScope || isDifferenceMode;
+    const requestedPath = isDifferenceMode ? (bandPathOverrideRef.current ?? differencePath) : resolveModePath(playbackMode);
+    const basisMatches = residualBasisRef.current?.path === requestedPath;
+    const useResidualPlayback = isDifferenceMode && basisMatches && Boolean(residualBufRef.current);
+    const shouldUseRouter = (usingBandScope || isDifferenceMode) && !useResidualPlayback;
 
     const bandSettings: BandSettings = {
       enabled: usingBandScope && !isFullRangeBand,
@@ -672,7 +697,8 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
 
       const buffer = music;
       const src = new AudioBufferSourceNode(ctx, { buffer });
-      const volume = new GainNode(ctx, { gain: 1 });
+      differenceGainSignRef.current = 1;
+      const volume = new GainNode(ctx, { gain: isDifferenceMode ? differenceVol : 1 });
 
       srcRef.current = src;
       gainRef.current = volume;
@@ -759,7 +785,6 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
       );
       const maxLatency = latencyValues.length > 0 ? Math.max(...latencyValues) : 0;
       const startAt = Math.max(0, clampedStart - maxLatency);
-      const requestedPath = bandPathOverrideRef.current ?? resolveModePath(playbackMode);
       let resolvedPath = ensurePathAvailable(requestedPath);
       if (!resolvedPath && playbackMode === "difference") {
         let fallbackDelta: DifferenceMode | null = null;
@@ -850,8 +875,11 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
     }
 
     const src = new AudioBufferSourceNode(ctx, { buffer });
+    const differenceSign =
+      useResidualPlayback && requestedPath !== "aMinusB" ? -1 : 1;
+    differenceGainSignRef.current = differenceSign;
     const initialGain = isDifference
-      ? differenceVol
+      ? differenceVol * differenceSign
       : isConvolvedA
       ? convolvedVol * playbackNormGains.convolvedA
       : isConvolvedB
@@ -870,6 +898,7 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
     convCRef.current = null;
     matchGainCRef.current = null;
 
+    residualBandRef.current = null;
     if (isConvolved) {
       const irBufferRef = isConvolvedB ? irCBufRef : irBufRef;
       const ir = irBufferRef.current;
@@ -896,7 +925,14 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
       const residualRate = buffer.sampleRate || sessionSampleRate;
       convolverLatencyRef.current =
         isDifference && residualRate > 0 ? latencySamples / residualRate : 0;
-      src.connect(volume).connect(ctx.destination);
+      if (useResidualPlayback && usingBandScope && !isFullRangeBand) {
+        const band = createBandpassChain(ctx, bandSettings);
+        residualBandRef.current = band;
+        src.connect(band.input);
+        band.output.connect(volume).connect(ctx.destination);
+      } else {
+        src.connect(volume).connect(ctx.destination);
+      }
     }
 
     src.onended = () => {
@@ -1136,6 +1172,100 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
     }
   }
 
+  const isResidualBasisCurrent = useCallback((
+    basis: ResidualBasis | null,
+    path: DifferenceMode,
+    music: AudioBuffer | null,
+    irB: AudioBuffer | null,
+    irC: AudioBuffer | null,
+  ) => {
+    if (!basis || !music) return false;
+    if (basis.path !== path) return false;
+    if (basis.sourceMusic !== music) return false;
+    switch (path) {
+      case "origMinusA":
+        return basis.sourceIrB === irB;
+      case "origMinusB":
+        return basis.sourceIrC === irC;
+      case "aMinusB":
+        return basis.sourceIrB === irB && basis.sourceIrC === irC;
+      default:
+        return false;
+    }
+  }, []);
+
+  const buildResidualBasisForPath = useCallback(
+    async (path: DifferenceMode): Promise<ResidualBasis | null> => {
+      const music = musicBufRef.current;
+      if (!music) return null;
+      const irB = irBufRef.current;
+      const irC = irCBufRef.current;
+
+      if (path === "origMinusA") {
+        if (!irB) return null;
+        const prepared = await prepareResidualBasis(music, irB);
+        if (!prepared) return null;
+        return {
+          path,
+          music,
+          ir: irB,
+          convolved: prepared.convolved,
+          offset: prepared.offset,
+          gains: prepared.gains,
+          fallbackResidual: prepared.fallbackResidual,
+          sourceMusic: music,
+          sourceIrB: irB,
+          sourceIrC: null,
+          latencySamples: prepared.offset,
+        };
+      }
+
+      if (path === "origMinusB") {
+        if (!irC) return null;
+        const prepared = await prepareResidualBasis(music, irC);
+        if (!prepared) return null;
+        return {
+          path,
+          music,
+          ir: irC,
+          convolved: prepared.convolved,
+          offset: prepared.offset,
+          gains: prepared.gains,
+          fallbackResidual: prepared.fallbackResidual,
+          sourceMusic: music,
+          sourceIrB: null,
+          sourceIrC: irC,
+          latencySamples: prepared.offset,
+        };
+      }
+
+      if (!irB || !irC) return null;
+      const preparedA = await prepareResidualBasis(music, irB);
+      if (!preparedA) return null;
+      const preparedB = await prepareResidualBasis(music, irC);
+      if (!preparedB) return null;
+
+      const offset = preparedA.offset - preparedB.offset;
+      const { residual, gains } = makeResidualBuffer(preparedA.convolved, preparedB.convolved, offset);
+      limitPeakInPlace(residual, -0.3);
+
+      return {
+        path,
+        music: preparedB.convolved,
+        ir: null,
+        convolved: preparedA.convolved,
+        offset,
+        gains,
+        fallbackResidual: ensureMonoBuffer(residual),
+        sourceMusic: music,
+        sourceIrB: irB,
+        sourceIrC: irC,
+        latencySamples: 0,
+      };
+    },
+    [],
+  );
+
   const computeResidualWithWorker = useCallback(
     (
       basis: ResidualBasis,
@@ -1202,8 +1332,11 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
 
     const computeResidual = async () => {
       const music = musicBufRef.current;
-      const ir = irBufRef.current;
-      if (!music || !ir) {
+      const irB = irBufRef.current;
+      const irC = irCBufRef.current;
+      const needsIrB = differencePath === "origMinusA" || differencePath === "aMinusB";
+      const needsIrC = differencePath === "origMinusB" || differencePath === "aMinusB";
+      if (!music || (needsIrB && !irB) || (needsIrC && !irC)) {
         residualBasisRef.current = null;
         residualBufRef.current = null;
         if (!cancelled) {
@@ -1215,13 +1348,12 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
       }
 
       let basis = residualBasisRef.current;
-      const needsBasis =
-        !basis || basis.music !== music || basis.ir !== ir;
+      const needsBasis = !isResidualBasisCurrent(basis, differencePath, music, irB, irC);
 
       if (needsBasis) {
         if (!cancelled) setResidualComputing(true);
         try {
-          const prepared = await prepareResidualBasis(music, ir);
+          const prepared = await buildResidualBasisForPath(differencePath);
           if (cancelled) return;
           if (!prepared) {
             residualBasisRef.current = null;
@@ -1233,7 +1365,7 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
           }
           residualBasisRef.current = prepared;
           basis = prepared;
-          setLatencySamples(prepared.offset);
+          setLatencySamples(prepared.latencySamples);
           setKPerCh(prepared.gains);
         } catch (err) {
           if (cancelled) return;
@@ -1283,12 +1415,16 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
   }, [
     musicBuffer,
     irBuffer,
+    irCBuffer,
+    differencePath,
     differenceThresholdDb,
     soloBandEnabled,
     soloBandMinHz,
     soloBandMaxHz,
     isPlaying,
     mode,
+    buildResidualBasisForPath,
+    isResidualBasisCurrent,
     computeResidualWithWorker,
     teardownGraph,
   ]);
@@ -1517,14 +1653,14 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
   }, [availableDifferencePaths, differencePath, handleDifferencePathChange, mode]);
 
   useEffect(() => {
-    if (!auditionRouterRef.current) return;
-    if (!bandScopeEngaged) return;
-    auditionRouterRef.current.updateBand({
+    const settings = {
       enabled: isBandActive,
       minHz: playbackBandMinHz,
       maxHz: playbackBandMaxHz,
-    });
-  }, [bandScopeEngaged, isBandActive, playbackBandMinHz, playbackBandMaxHz]);
+    };
+    auditionRouterRef.current?.updateBand(settings);
+    residualBandRef.current?.update(settings);
+  }, [isBandActive, playbackBandMinHz, playbackBandMaxHz]);
 
   useEffect(() => {
     const [prevMin, prevMax] = previousPlaybackBandRef.current;
@@ -1644,7 +1780,7 @@ ${slotState.label} loaded: ${file.name} - ${buf.sampleRate} Hz - ${buf.duration.
   function onChangeDifferenceVol(v: number) {
     setDifferenceVol(v);
     if (gainRef.current && mode === "difference") {
-      gainRef.current.gain.value = v;
+      gainRef.current.gain.value = v * differenceGainSignRef.current;
     }
   }
 
@@ -1971,9 +2107,12 @@ ${message}`);
 
   async function renderAndExportDifference() {
     const music = musicBufRef.current;
-    const ir = irBufRef.current;
-    if (!music || !ir) {
-      setStatus("Load music and IR first.");
+    const irB = irBufRef.current;
+    const irC = irCBufRef.current;
+    const needsIrB = differencePath === "origMinusA" || differencePath === "aMinusB";
+    const needsIrC = differencePath === "origMinusB" || differencePath === "aMinusB";
+    if (!music || (needsIrB && !irB) || (needsIrC && !irC)) {
+      setStatus("Load music and the required IR(s) first.");
       return;
     }
 
@@ -1981,15 +2120,15 @@ ${message}`);
 
     let basis = residualBasisRef.current;
     try {
-      if (!basis || basis.music !== music || basis.ir !== ir) {
-        const prepared = await prepareResidualBasis(music, ir);
+      if (!isResidualBasisCurrent(basis, differencePath, music, irB, irC)) {
+        const prepared = await buildResidualBasisForPath(differencePath);
         if (!prepared) {
           setStatus("Difference render failed: missing buffers.");
           return;
         }
         residualBasisRef.current = prepared;
         basis = prepared;
-        setLatencySamples(prepared.offset);
+        setLatencySamples(prepared.latencySamples);
         setKPerCh(prepared.gains);
       }
     } catch (err) {
@@ -2574,7 +2713,7 @@ export default function App() {
 }
 
 
-async function prepareResidualBasis(music: AudioBuffer, ir: AudioBuffer): Promise<ResidualBasis | null> {
+async function prepareResidualBasis(music: AudioBuffer, ir: AudioBuffer): Promise<PreparedResidualBasis | null> {
   const targetRate = music.sampleRate;
   const irForOffline = ir.sampleRate === targetRate ? ir : resampleAudioBuffer(ir, targetRate);
   const offlineLength = Math.max(1, music.length + irForOffline.length - 1);
@@ -2607,7 +2746,7 @@ function makeResidualBuffer(
   const sampleRate = convolved.sampleRate;
   const residual = new AudioBuffer({ numberOfChannels: channelCount, length, sampleRate });
   const gains: number[] = [];
-  const delay = Math.max(0, Math.floor(offsetSamples));
+  const delay = Math.floor(offsetSamples);
 
   for (let ch = 0; ch < channelCount; ch++) {
     const y = convolved.getChannelData(ch);
@@ -2622,7 +2761,7 @@ function makeResidualBuffer(
       continue;
     }
 
-    const overlapStart = Math.min(Math.max(0, delay), length);
+    const overlapStart = Math.max(0, delay);
     const overlapEnd = Math.min(length, x.length + delay);
 
     let num = 0;

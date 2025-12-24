@@ -149,7 +149,7 @@ function alignAndMixDry(
   offsetSamples: number,
 ): Float32Array {
   const aligned = new Float32Array(length);
-  const delay = Math.max(0, Math.floor(offsetSamples));
+  const delay = Math.floor(offsetSamples);
   const count = dryChannels.length > 0 ? dryChannels.length : 1;
 
   for (let ch = 0; ch < count; ch++) {
